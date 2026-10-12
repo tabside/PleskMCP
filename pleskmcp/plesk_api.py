@@ -1,0 +1,389 @@
+"""Minimal Plesk XML API (agent.php) client.
+
+Only read operations plus secret_key create/delete are used. Credentials are
+passed per call and never stored by this module.
+"""
+
+from __future__ import annotations
+
+import logging
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from typing import Any
+from xml.sax.saxutils import escape
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+# Plesk XML API system error codes
+ERR_WRONG_CREDENTIALS = 1001
+ERR_PERMISSION_DENIED = 1006
+ERR_ACCOUNT_SUSPENDED = 1011
+ERR_NOT_FOUND = 1013
+ERR_NO_AUTH_METHOD = 1029
+
+
+class PleskError(Exception):
+    """Transport or protocol failure (network, bad XML, HTTP error)."""
+
+
+class PleskSystemError(PleskError):
+    """`<system>` level error: authentication rejected, account suspended, ..."""
+
+    def __init__(self, code: int, text: str):
+        super().__init__(f"Plesk system error {code}: {text}")
+        self.code = code
+        self.text = text
+
+
+class PleskResultError(PleskError):
+    """Operator level `<result><status>error</status>` (e.g. 1006 permission denied)."""
+
+    def __init__(self, code: int, text: str):
+        super().__init__(f"Plesk result error {code}: {text}")
+        self.code = code
+        self.text = text
+
+
+@dataclass(frozen=True)
+class PasswordAuth:
+    login: str
+    password: str
+
+    def headers(self) -> dict[str, str]:
+        return {"HTTP_AUTH_LOGIN": self.login, "HTTP_AUTH_PASSWD": self.password}
+
+
+@dataclass(frozen=True)
+class KeyAuth:
+    key: str
+
+    def headers(self) -> dict[str, str]:
+        return {"KEY": self.key}
+
+
+Auth = PasswordAuth | KeyAuth
+
+
+@dataclass
+class CustomerInfo:
+    id: int
+    login: str
+    name: str
+    status: int
+    email: str | None = None
+
+
+@dataclass
+class DomainInfo:
+    name: str
+    kind: str  # webspace | site | subdomain
+    sysuser: str
+    docroot: str
+    webspace: str  # name of the subscription the domain belongs to
+    status: int = 0
+    id: int | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "kind": self.kind,
+            "sysuser": self.sysuser,
+            "docroot": self.docroot,
+            "webspace": self.webspace,
+            "status": self.status,
+            "id": self.id,
+        }
+
+    @staticmethod
+    def from_dict(data: dict[str, Any]) -> "DomainInfo":
+        return DomainInfo(
+            name=data["name"],
+            kind=data.get("kind", "webspace"),
+            sysuser=data["sysuser"],
+            docroot=data["docroot"],
+            webspace=data.get("webspace", data["name"]),
+            status=int(data.get("status", 0)),
+            id=data.get("id"),
+        )
+
+
+@dataclass
+class _Result:
+    status: str
+    id: int | None
+    errcode: int | None
+    errtext: str | None
+    element: ET.Element
+    properties: dict[str, str] = field(default_factory=dict)
+
+
+def _text(el: ET.Element | None) -> str | None:
+    if el is None or el.text is None:
+        return None
+    return el.text.strip()
+
+
+def _int(value: str | None) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return None
+
+
+class PleskClient:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        verify_ssl: bool = True,
+        timeout: float = 20.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
+        self._url = base_url.rstrip("/") + "/enterprise/control/agent.php"
+        self._client = httpx.AsyncClient(verify=verify_ssl, timeout=timeout, transport=transport, follow_redirects=False)
+
+    async def aclose(self) -> None:
+        await self._client.aclose()
+
+    # ------------------------------------------------------------------ low level
+    async def call(self, packet_body: str, auth: Auth) -> ET.Element:
+        packet = f'<?xml version="1.0" encoding="UTF-8"?><packet version="1.6.9.1">{packet_body}</packet>'
+        headers = {"Content-Type": "text/xml", "Accept": "text/xml"}
+        headers.update(auth.headers())
+        try:
+            response = await self._client.post(self._url, content=packet.encode("utf-8"), headers=headers)
+        except httpx.HTTPError as exc:
+            raise PleskError(f"Plesk API request failed: {exc.__class__.__name__}") from exc
+        if response.status_code != 200:
+            raise PleskError(f"Plesk API returned HTTP {response.status_code}")
+        try:
+            root = ET.fromstring(response.content)
+        except ET.ParseError as exc:
+            raise PleskError("Plesk API returned invalid XML") from exc
+        system = root.find("system")
+        if system is not None and _text(system.find("status")) == "error":
+            code = _int(_text(system.find("errcode"))) or 0
+            raise PleskSystemError(code, _text(system.find("errtext")) or "")
+        return root
+
+    @staticmethod
+    def _results(root: ET.Element, path: str) -> list[_Result]:
+        results: list[_Result] = []
+        for el in root.iterfind(path):
+            status = _text(el.find("status")) or "error"
+            props: dict[str, str] = {}
+            for prop in el.iter("property"):
+                name = _text(prop.find("name"))
+                value = _text(prop.find("value"))
+                if name is not None:
+                    props[name] = value or ""
+            results.append(
+                _Result(
+                    status=status,
+                    id=_int(_text(el.find("id"))),
+                    errcode=_int(_text(el.find("errcode"))),
+                    errtext=_text(el.find("errtext")),
+                    element=el,
+                    properties=props,
+                )
+            )
+        return results
+
+    # ----------------------------------------------------------------- customers
+    async def get_customer(self, login: str, auth: Auth) -> CustomerInfo | None:
+        """`customer get` filtered by login. Returns None if no such customer is visible."""
+        body = (
+            f"<customer><get><filter><login>{escape(login)}</login></filter>"
+            "<dataset><gen_info/></dataset></get></customer>"
+        )
+        root = await self.call(body, auth)
+        results = self._results(root, "./customer/get/result")
+        if not results:
+            raise PleskError("customer get returned no result")
+        result = results[0]
+        if result.status != "ok":
+            if result.errcode == ERR_NOT_FOUND:
+                return None
+            raise PleskResultError(result.errcode or 0, result.errtext or "")
+        gen = result.element.find("./data/gen_info")
+        if gen is None:
+            raise PleskError("customer get returned no gen_info")
+        return CustomerInfo(
+            id=result.id or 0,
+            login=_text(gen.find("login")) or "",
+            name=_text(gen.find("pname")) or _text(gen.find("cname")) or "",
+            status=_int(_text(gen.find("status"))) or 0,
+            email=_text(gen.find("email")),
+        )
+
+    async def verify_customer(self, login: str, password: str) -> CustomerInfo:
+        """Authenticate as `login` and prove it is an active *customer* account.
+
+        Raises PleskSystemError (wrong password 1001, suspended 1011, ...),
+        PleskResultError (1006: the login is not a customer, e.g. an additional
+        user) or PleskError. Admin and reseller logins see no customer with their
+        own login and are rejected with PleskResultError(1013).
+        """
+        auth = PasswordAuth(login, password)
+        info = await self.get_customer(login, auth)
+        if info is None or info.login != login:
+            raise PleskResultError(ERR_NOT_FOUND, "login is not a customer account")
+        if info.status != 0:
+            raise PleskSystemError(ERR_ACCOUNT_SUSPENDED, "account is not active")
+        return info
+
+    # ------------------------------------------------------------------- domains
+    async def list_domains(self, auth: Auth, *, owner_login: str | None = None) -> list[DomainInfo]:
+        """All hosted webspaces, addon domains and subdomains visible to `auth`.
+
+        With `owner_login` (admin key), the webspaces are filtered by owner.
+        """
+        if owner_login:
+            ws_filter = f"<filter><owner-login>{escape(owner_login)}</owner-login></filter>"
+        else:
+            ws_filter = "<filter/>"
+        root = await self.call(
+            f"<webspace><get>{ws_filter}<dataset><gen_info/><hosting/></dataset></get></webspace>", auth
+        )
+        domains: list[DomainInfo] = []
+        by_id: dict[int, DomainInfo] = {}
+        by_guid: dict[str, DomainInfo] = {}
+        for result in self._results(root, "./webspace/get/result"):
+            if result.status != "ok":
+                # A suspended subscription answers 1006 for its own entry; skip it.
+                logger.info("webspace %s skipped: %s %s", result.id, result.errcode, result.errtext)
+                continue
+            gen = result.element.find("./data/gen_info")
+            if gen is None or result.element.find("./data/hosting/vrt_hst") is None:
+                continue
+            name = _text(gen.find("name")) or ""
+            sysuser = result.properties.get("ftp_login", "")
+            docroot = result.properties.get("www_root", "")
+            if not name or not sysuser or not docroot:
+                continue
+            info = DomainInfo(
+                name=name,
+                kind="webspace",
+                sysuser=sysuser,
+                docroot=docroot,
+                webspace=name,
+                status=_int(_text(gen.find("status"))) or 0,
+                id=result.id,
+            )
+            domains.append(info)
+            if result.id is not None:
+                by_id[result.id] = info
+            guid = _text(gen.find("guid"))
+            if guid:
+                by_guid[guid] = info
+        if not domains:
+            return domains
+
+        # Addon domains (sites) of those webspaces
+        if owner_login:
+            site_body = "".join(
+                f"<site><get><filter><webspace-id>{d.id}</webspace-id></filter>"
+                "<dataset><gen_info/><hosting/></dataset></get></site>"
+                for d in domains
+                if d.id
+            )
+        else:
+            site_body = "<site><get><filter/><dataset><gen_info/><hosting/></dataset></get></site>"
+        try:
+            root = await self.call(site_body, auth)
+        except PleskResultError:
+            root = None
+        if root is not None:
+            for result in self._results(root, "./site/get/result"):
+                if result.status != "ok":
+                    continue
+                gen = result.element.find("./data/gen_info")
+                if gen is None or result.element.find("./data/hosting/vrt_hst") is None:
+                    continue
+                name = _text(gen.find("name")) or ""
+                parent = None
+                ws_id = _int(_text(gen.find("webspace-id")))
+                ws_guid = _text(gen.find("webspace-guid"))
+                if ws_id is not None and ws_id in by_id:
+                    parent = by_id[ws_id]
+                elif ws_guid and ws_guid in by_guid:
+                    parent = by_guid[ws_guid]
+                sysuser = result.properties.get("ftp_login") or (parent.sysuser if parent else "")
+                docroot = result.properties.get("www_root", "")
+                if not name or not sysuser or not docroot or parent is None:
+                    continue
+                info = DomainInfo(
+                    name=name,
+                    kind="site",
+                    sysuser=sysuser,
+                    docroot=docroot,
+                    webspace=parent.webspace,
+                    status=_int(_text(gen.find("status"))) or 0,
+                    id=result.id,
+                )
+                domains.append(info)
+                if result.id is not None:
+                    by_id[result.id] = info
+
+        # Subdomains
+        try:
+            root = await self.call("<subdomain><get><filter/></get></subdomain>", auth)
+        except PleskResultError:
+            root = None
+        if root is not None:
+            for result in self._results(root, "./subdomain/get/result"):
+                if result.status != "ok":
+                    continue
+                data = result.element.find("./data")
+                if data is None:
+                    continue
+                name = _text(data.find("name")) or ""
+                parent_id = _int(_text(data.find("parent-id")))
+                parent = by_id.get(parent_id) if parent_id is not None else None
+                sysuser = result.properties.get("ftp_login") or (parent.sysuser if parent else "")
+                docroot = result.properties.get("www_root", "")
+                if not name or not sysuser or not docroot or parent is None:
+                    continue
+                domains.append(
+                    DomainInfo(
+                        name=name,
+                        kind="subdomain",
+                        sysuser=sysuser,
+                        docroot=docroot,
+                        webspace=parent.webspace,
+                        status=0,
+                        id=result.id,
+                    )
+                )
+        return domains
+
+    # --------------------------------------------------------------- secret keys
+    async def create_secret_key(self, auth: Auth, *, ip_address: str | None, description: str, login: str | None = None) -> str:
+        parts = []
+        if ip_address:
+            parts.append(f"<ip_address>{escape(ip_address)}</ip_address>")
+        parts.append(f"<description>{escape(description)}</description>")
+        if login:
+            parts.append(f"<login>{escape(login)}</login>")
+        root = await self.call(f"<secret_key><create>{''.join(parts)}</create></secret_key>", auth)
+        results = self._results(root, "./secret_key/create/result")
+        if not results:
+            raise PleskError("secret_key create returned no result")
+        result = results[0]
+        if result.status != "ok":
+            raise PleskResultError(result.errcode or 0, result.errtext or "")
+        key = _text(result.element.find("key"))
+        if not key:
+            raise PleskError("secret_key create returned no key")
+        return key
+
+    async def delete_secret_key(self, auth: Auth, key: str) -> bool:
+        root = await self.call(
+            f"<secret_key><delete><filter><key>{escape(key)}</key></filter></delete></secret_key>", auth
+        )
+        results = self._results(root, "./secret_key/delete/result")
+        return bool(results) and results[0].status == "ok"

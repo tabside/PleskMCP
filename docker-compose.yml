@@ -1,0 +1,66 @@
+services:
+  pleskmcp:
+    # Image built and published by GitHub Actions on every push to main
+    # (.github/workflows/docker-publish.yml). If the GHCR package is private,
+    # add a ghcr.io registry with a read:packages token in Portainer.
+    image: ghcr.io/tabside/pleskmcp:latest
+    pull_policy: always
+    container_name: pleskmcp
+    restart: unless-stopped
+    environment:
+      # Public URL of this service (path prefix allowed), e.g. https://mcp.example.com/plesk
+      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
+      - SERVICE_NAME=${SERVICE_NAME:-Plesk Files MCP}
+      # Plesk XML API
+      - PLESK_URL=${PLESK_URL}
+      - PLESK_VERIFY_SSL=${PLESK_VERIFY_SSL:-true}
+      - PLESK_TIMEOUT=${PLESK_TIMEOUT:-20}
+      # SSH to the Plesk server as the unprivileged helper user
+      - PLESK_SSH_HOST=${PLESK_SSH_HOST}
+      - PLESK_SSH_PORT=${PLESK_SSH_PORT:-22}
+      - PLESK_SSH_USER=${PLESK_SSH_USER:-pleskmcp}
+      - PLESK_SSH_KEY_PATH=${PLESK_SSH_KEY_PATH:-/run/secrets/pleskmcp_ssh_key}
+      - PLESK_SSH_HOST_KEY=${PLESK_SSH_HOST_KEY:-}
+      - PLESK_SSH_KNOWN_HOSTS=${PLESK_SSH_KNOWN_HOSTS:-}
+      - PLESK_SSH_TIMEOUT=${PLESK_SSH_TIMEOUT:-60}
+      - PLESK_HELPER_PATH=${PLESK_HELPER_PATH:-/usr/local/bin/pleskmcp-helper}
+      # Account status checks: customer_key | admin_key | login_only
+      - ACCOUNT_CHECK_MODE=${ACCOUNT_CHECK_MODE:-customer_key}
+      - ACCOUNT_CHECK_TTL=${ACCOUNT_CHECK_TTL:-60}
+      - CUSTOMER_KEY_IP=${CUSTOMER_KEY_IP:-}
+      - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY:-}
+      - PLESK_ADMIN_API_KEY=${PLESK_ADMIN_API_KEY:-}
+      # Tokens and limits
+      - ACCESS_TOKEN_TTL=${ACCESS_TOKEN_TTL:-1800}
+      - REFRESH_TOKEN_TTL=${REFRESH_TOKEN_TTL:-2592000}
+      - READ_MAX_BYTES=${READ_MAX_BYTES:-2097152}
+      - WRITE_MAX_BYTES=${WRITE_MAX_BYTES:-5242880}
+      - LIST_MAX_ENTRIES=${LIST_MAX_ENTRIES:-2000}
+      - LOG_MAX_LINES=${LOG_MAX_LINES:-500}
+      - LOGIN_FAIL_LIMIT_IP=${LOGIN_FAIL_LIMIT_IP:-10}
+      - LOGIN_FAIL_LIMIT_LOGIN=${LOGIN_FAIL_LIMIT_LOGIN:-5}
+      - LOGIN_FAIL_WINDOW=${LOGIN_FAIL_WINDOW:-900}
+      - PLESK_FAIL_BUDGET=${PLESK_FAIL_BUDGET:-4}
+      - PLESK_FAIL_BUDGET_WINDOW=${PLESK_FAIL_BUDGET_WINDOW:-600}
+      # Reverse proxy IP(s) whose X-Forwarded-For is trusted (client IP for rate limits and audit)
+      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-127.0.0.1}
+      - AUDIT_LOG_FILE=${AUDIT_LOG_FILE:-/data/audit.log}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATA_DIR=/data
+      - MCP_HOST=0.0.0.0
+      - MCP_PORT=8000
+    volumes:
+      - pleskmcp-data:/data
+    secrets:
+      - pleskmcp_ssh_key
+    ports:
+      # Bind to localhost only; a reverse proxy with TLS terminates in front.
+      - "${MCP_BIND_ADDR:-127.0.0.1}:${MCP_HOST_PORT:-8426}:8000"
+
+volumes:
+  pleskmcp-data:
+
+secrets:
+  pleskmcp_ssh_key:
+    # Private key of the SSH user "pleskmcp" on the Plesk server (ed25519, no passphrase).
+    file: ${PLESK_SSH_KEY_FILE:-./pleskmcp_ssh_key}

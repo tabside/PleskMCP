@@ -1,0 +1,8 @@
+# /etc/sudoers.d/pleskmcp  (mode 0440, validate with: visudo -cf /etc/sudoers.d/pleskmcp)
+#
+# The SSH user "pleskmcp" may run exactly one command, without arguments,
+# as any member of the Plesk group psacln (the subscription system users).
+# root is not a member of psacln, so running as root is impossible.
+Defaults:pleskmcp !requiretty
+Defaults:pleskmcp env_reset
+pleskmcp ALL=(%psacln) NOPASSWD: /usr/local/bin/pleskmcp-helper ""

@@ -1,0 +1,17 @@
+#!/bin/bash
+# Forced command for the pleskmcp SSH key (authorized_keys: restrict,command="/usr/local/bin/pleskmcp-sshwrap").
+# Accepts exactly:  sudo -n -u <sysuser> /usr/local/bin/pleskmcp-helper
+# and nothing else. The request itself travels on stdin as JSON.
+set -eu
+cmd="${SSH_ORIGINAL_COMMAND:-}"
+re='^sudo -n -u ([A-Za-z0-9][A-Za-z0-9._-]{0,31}) /usr/local/bin/pleskmcp-helper$'
+if [[ "$cmd" =~ $re ]]; then
+    user="${BASH_REMATCH[1]}"
+    if [[ "$user" == "root" ]]; then
+        echo "refused" >&2
+        exit 77
+    fi
+    exec /usr/bin/sudo -n -u "$user" /usr/local/bin/pleskmcp-helper
+fi
+echo "refused" >&2
+exit 77
