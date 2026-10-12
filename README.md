@@ -14,7 +14,7 @@ Dieses Repo ist öffentlich. Code, README, Tests und Beispiele enthalten keine e
 - **Passwörter werden nie gespeichert und nie geloggt.** Access- und Refresh-Tokens liegen nur als SHA-256-Hash in SQLite. Access-Tokens sind kurzlebig (Standard 30 Minuten), Refresh-Tokens rotieren, die Wiederverwendung eines alten Refresh-Tokens widerruft die ganze Token-Familie.
 - **Statusprüfung pro Tool-Aufruf** (kurz gecacht): gelöschte oder gesperrte Plesk-Konten fallen durch, gesperrte Abonnements verschwinden aus der Domainliste.
 - **Sicherungen und Papierkorb** liegen im Abonnement des Kunden unter `/var/www/vhosts/<abo>/.pleskmcp/` (Modus 0700), also ausserhalb jedes Document Root und nicht per Browser erreichbar. `delete_file` löscht nie endgültig.
-- **Audit-Log** (JSON Lines) für jede Anmeldung und jeden schreibenden Aufruf: Zeit, Plesk-Login, Domain, Pfad, Tool, Client. Keine Dateiinhalte, keine Secrets.
+- **Audit-Log** (JSON Lines) für jede Anmeldung und jeden schreibenden Aufruf: Zeit, Plesk-Login, Domain, Pfad, Tool, Client. Bei DNS-Änderungen Typ, Host und Record-ID, nie den Wert. Keine Dateiinhalte, keine Secrets.
 - **Rate-Limits** für Anmeldeversuche pro IP und pro Login plus ein globales Budget fehlgeschlagener Plesk-Logins, damit Plesks Fail2ban die IP des Dienstes nicht sperrt (siehe unten).
 
 ## Verifizierte Plesk-Fakten (Plesk Obsidian 18.0.80, CloudLinux 8)
@@ -154,8 +154,16 @@ Sicherungen: `write_file`, `replace_in_file` und `move_file` mit `overwrite` kop
 | `delete_file` | In den Papierkorb verschieben (Ordner nur mit `recursive`) |
 | `restore_file` | Papierkorb auflisten oder einen Eintrag wiederherstellen |
 | `search_log` | access_log/error_log der Domain nach einem regulären Ausdruck durchsuchen (read-only) |
+| `dns_list_records` | DNS-Einträge der Zone einer eigenen Domain (SOA/NS als `locked` markiert) |
+| `dns_add_record` | Eintrag anlegen (A, AAAA, CNAME, MX, TXT, SRV, PTR, DS), `confirm=true` nötig |
+| `dns_update_record` | Wert, Priorität, Gewicht oder Port eines Eintrags ändern (Delete plus Add, neue id), `confirm=true` nötig |
+| `dns_delete_record` | Eintrag löschen, `confirm=true` nötig |
 
-Scopes: `files:read` (Lesen) und `files:write` (Schreiben). Kein Tool für freie Shell-Befehle.
+Scopes: `files:read`, `files:write`, `dns:read`, `dns:write`. Kein Tool für freie Shell-Befehle.
+
+**DNS im Detail.** Die DNS-Tools laufen über die Plesk XML API im Kontext des Kunden (Modus `customer_key`) oder mit dem Admin-Key (Modus `admin_key`, dann prüft der Code zusätzlich jeden Eintrag gegen die Zone). Im Modus `login_only` sind sie nicht verfügbar. Plesk selbst entscheidet, ob die Zone dem Kunden gehört und ob sein Abo DNS-Verwaltung erlaubt (fremde Zonen liefern `1006 Permission denied`). SOA- und NS-Einträge sind gesperrt, damit niemand die Zone versehentlich umdelegiert. Vor jeder Änderung exportiert der Dienst die komplette Zone als JSON nach `/var/www/vhosts/<abo>/.pleskmcp/dns/<domain>/<zeitstempel>.json` (die letzten 20). Ohne `confirm=true` liefern die schreibenden Tools nur eine Vorschau. Subdomains haben in Plesk keine eigene Zone, ihre Einträge liegen in der Zone der übergeordneten Domain.
+
+Feldformat der XML API (am Server bestätigt): `host` ist der FQDN mit Punkt am Ende (`www.example.com.`), Hostnamen in `value` ebenso, `opt` trägt bei MX die Priorität und bei SRV `Priorität Gewicht Port`. Das Anlegen und Löschen wurde gegen eine Nachbildung der API getestet, der erste Live-Test gehört in die Abnahme mit einem Testkunden.
 
 **Nicht umgesetzt: Datenbankabfragen.** Plesk legt DB-Benutzer pro Datenbank an, es gibt keinen kundenweiten Nur-Lese-Benutzer, und Datenbanknamen tragen kein Kundenpräfix für Wildcard-Grants. Eine saubere Lösung bräuchte pro Kunde einen vom Administrator gepflegten MySQL-Benutzer mit ausschliesslich SELECT auf die Datenbanken dieses Kunden plus Fernzugriff vom Docker-Host. Eine Lösung über den Plesk-DB-Admin mit SQL-Filter im Code wurde bewusst nicht gebaut.
 

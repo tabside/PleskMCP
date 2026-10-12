@@ -27,6 +27,8 @@ CSRF_COOKIE = "pleskmcp_login"
 SCOPE_TEXT = {
     "files:read": "Dateien der eigenen Webseiten lesen",
     "files:write": "Dateien der eigenen Webseiten ändern, verschieben und in den Papierkorb legen",
+    "dns:read": "DNS-Einträge der eigenen Domains lesen",
+    "dns:write": "DNS-Einträge der eigenen Domains anlegen, ändern und löschen (ausser SOA und NS)",
 }
 
 _PAGE = """<!doctype html>

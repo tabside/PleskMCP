@@ -257,6 +257,20 @@ class AccountService:
         self._audit.write("tokens_revoked", login=login, tokens_revoked=revoked, source="cli")
         return revoked
 
+    # ---------------------------------------------------------------- api auth
+    def api_auth_for(self, login: str) -> KeyAuth | None:
+        """Credential for XML API calls on behalf of `login` (DNS tools). None in login_only mode."""
+        mode = self._settings.account_check_mode
+        if mode == "admin_key" and self._settings.plesk_admin_api_key:
+            return KeyAuth(self._settings.plesk_admin_api_key)
+        if mode == "customer_key":
+            row = self._store.get_account(login)
+            if row is None or not row.secret_key_enc:
+                return None
+            key = self._decrypt(row.secret_key_enc)
+            return KeyAuth(key) if key else None
+        return None
+
     # ----------------------------------------------------------------- domains
     @staticmethod
     def resolve_domain(account: Account, name: str) -> DomainInfo:

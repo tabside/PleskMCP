@@ -110,6 +110,19 @@ class DomainInfo:
 
 
 @dataclass
+class DnsRecord:
+    id: int
+    site_id: int | None
+    type: str
+    host: str
+    value: str
+    opt: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {"id": self.id, "site_id": self.site_id, "type": self.type, "host": self.host, "value": self.value, "opt": self.opt}
+
+
+@dataclass
 class _Result:
     status: str
     id: int | None
@@ -387,3 +400,63 @@ class PleskClient:
         )
         results = self._results(root, "./secret_key/delete/result")
         return bool(results) and results[0].status == "ok"
+
+    # ----------------------------------------------------------------------- dns
+    def _dns_record(self, result: _Result) -> DnsRecord | None:
+        data = result.element.find("./data")
+        if data is None or result.id is None:
+            return None
+        return DnsRecord(
+            id=result.id,
+            site_id=_int(_text(data.find("site-id"))),
+            type=(_text(data.find("type")) or "").upper(),
+            host=_text(data.find("host")) or "",
+            value=_text(data.find("value")) or "",
+            opt=_text(data.find("opt")) or "",
+        )
+
+    async def dns_get_records(self, auth: Auth, site_id: int) -> list[DnsRecord]:
+        root = await self.call(f"<dns><get_rec><filter><site-id>{int(site_id)}</site-id></filter></get_rec></dns>", auth)
+        records: list[DnsRecord] = []
+        for result in self._results(root, "./dns/get_rec/result"):
+            if result.status != "ok":
+                raise PleskResultError(result.errcode or 0, result.errtext or "")
+            record = self._dns_record(result)
+            if record is not None:
+                records.append(record)
+        return records
+
+    async def dns_get_record(self, auth: Auth, record_id: int) -> DnsRecord | None:
+        root = await self.call(f"<dns><get_rec><filter><id>{int(record_id)}</id></filter></get_rec></dns>", auth)
+        results = self._results(root, "./dns/get_rec/result")
+        if not results:
+            return None
+        result = results[0]
+        if result.status != "ok":
+            if result.errcode == ERR_NOT_FOUND:
+                return None
+            raise PleskResultError(result.errcode or 0, result.errtext or "")
+        return self._dns_record(result)
+
+    async def dns_add_record(self, auth: Auth, site_id: int, rtype: str, host: str, value: str, opt: str = "") -> int:
+        body = (
+            f"<dns><add_rec><site-id>{int(site_id)}</site-id><type>{escape(rtype)}</type>"
+            f"<host>{escape(host)}</host><value>{escape(value)}</value><opt>{escape(opt)}</opt></add_rec></dns>"
+        )
+        root = await self.call(body, auth)
+        results = self._results(root, "./dns/add_rec/result")
+        if not results:
+            raise PleskError("dns add_rec returned no result")
+        result = results[0]
+        if result.status != "ok" or result.id is None:
+            raise PleskResultError(result.errcode or 0, result.errtext or "")
+        return result.id
+
+    async def dns_del_record(self, auth: Auth, record_id: int) -> None:
+        root = await self.call(f"<dns><del_rec><filter><id>{int(record_id)}</id></filter></del_rec></dns>", auth)
+        results = self._results(root, "./dns/del_rec/result")
+        if not results:
+            raise PleskError("dns del_rec returned no result")
+        result = results[0]
+        if result.status != "ok":
+            raise PleskResultError(result.errcode or 0, result.errtext or "")

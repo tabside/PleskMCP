@@ -553,6 +553,29 @@ def op_restore_file(ws, args):
     return ws.restore_from_trash(trash_id)
 
 
+def op_store_write(ws, args):
+    """Keep a copy of data (e.g. a DNS zone export) in the helper store, outside every docroot."""
+    category = args.get("category")
+    if category not in ("dns",):
+        raise HelperError("bad_request", "unknown store category")
+    content = args.get("content")
+    if not isinstance(content, str) or len(content) > ws.limits["write_max_bytes"]:
+        raise HelperError("bad_request", "content missing or too large")
+    sdir = ws._ensure_store(category, ws.domain_dir)
+    stamp = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+    name = "%s.json" % stamp
+    target = os.path.join(sdir, name)
+    counter = 0
+    while os.path.lexists(target):
+        counter += 1
+        target = os.path.join(sdir, "%s.%d.json" % (stamp, counter))
+    with open(target, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    os.chmod(target, 0o600)
+    ws._prune_backups(sdir, "")
+    return {"backup": os.path.relpath(target, ws.home)}
+
+
 def op_search_log(ws, args):
     name = args.get("log", "access_log")
     if not isinstance(name, str) or not LOG_NAME_RE.match(name):
@@ -614,6 +637,7 @@ OPS = {
     "delete_file": op_delete_file,
     "restore_file": op_restore_file,
     "search_log": op_search_log,
+    "store_write": op_store_write,
 }
 
 

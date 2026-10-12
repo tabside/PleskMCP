@@ -40,6 +40,7 @@ from .auth.login import LoginPages
 from .auth.provider import PleskAuthProvider
 from .auth.ratelimit import LoginRateLimiter
 from .config import Settings
+from .dns import DnsRunner, register_dns_tools
 from .plesk_api import PleskClient
 from .remote import RemoteExecutor
 from .store import Store
@@ -103,6 +104,7 @@ def build_services(
     )
     runner = ToolRunner(settings, accounts, executor, audit)
     register_tools(mcp, runner, settings)
+    register_dns_tools(mcp, DnsRunner(settings, accounts, plesk, executor, audit, runner))
     return Services(settings, store, audit, plesk, accounts, provider, limiter, executor, mcp)
 
 

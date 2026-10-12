@@ -10,7 +10,7 @@ import os
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
-VALID_SCOPES = ["files:read", "files:write"]
+VALID_SCOPES = ["files:read", "files:write", "dns:read", "dns:write"]
 ACCOUNT_CHECK_MODES = ("customer_key", "admin_key", "login_only")
 
 

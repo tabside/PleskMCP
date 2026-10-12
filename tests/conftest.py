@@ -57,6 +57,61 @@ class FakePlesk:
         self.users: dict[str, FakeUser] = {}
         self.keys: dict[str, str] = {}  # key -> login
         self.calls: list[tuple[str | None, str]] = []
+        self.dns: dict[int, dict[str, Any]] = {}  # record id -> {site_id, type, host, value, opt}
+        self.next_dns_id = 1000
+
+    def add_dns(self, site_id: int, rtype: str, host: str, value: str, opt: str = "") -> int:
+        self.next_dns_id += 1
+        self.dns[self.next_dns_id] = {"site_id": site_id, "type": rtype, "host": host, "value": value, "opt": opt}
+        return self.next_dns_id
+
+    def _owned_site_ids(self, user: FakeUser) -> set[int]:
+        return {100 + i for i, d in enumerate(user.domains) if d.get("kind", "webspace") == "webspace"} | {
+            200 + i for i, d in enumerate(user.domains) if d.get("kind") == "site"
+        }
+
+    def _handle_dns(self, root: ET.Element, user: FakeUser) -> httpx.Response:
+        owned = self._owned_site_ids(user)
+        op = list(root.find("./dns"))[0]
+        denied = "<result><status>error</status><errcode>1006</errcode><errtext>Permission denied</errtext></result>"
+
+        def rec_xml(rid: int, r: dict[str, Any]) -> str:
+            return (
+                f"<result><status>ok</status><id>{rid}</id><data><site-id>{r['site_id']}</site-id><type>{r['type']}</type>"
+                f"<host>{r['host']}</host><value>{r['value']}</value><opt>{r['opt']}</opt></data></result>"
+            )
+
+        if op.tag == "get_rec":
+            site_id = op.find("./filter/site-id")
+            rec_id = op.find("./filter/id")
+            if site_id is not None:
+                sid = int(site_id.text)
+                if sid not in owned:
+                    return self._ok(f"<dns><get_rec>{denied}</get_rec></dns>")
+                body = "".join(rec_xml(i, r) for i, r in self.dns.items() if r["site_id"] == sid)
+                return self._ok(f"<dns><get_rec>{body}</get_rec></dns>")
+            if rec_id is not None:
+                rid = int(rec_id.text)
+                r = self.dns.get(rid)
+                if r is None:
+                    return self._ok("<dns><get_rec><result><status>error</status><errcode>1013</errcode><errtext>not found</errtext></result></get_rec></dns>")
+                if r["site_id"] not in owned:
+                    return self._ok(f"<dns><get_rec>{denied}</get_rec></dns>")
+                return self._ok(f"<dns><get_rec>{rec_xml(rid, r)}</get_rec></dns>")
+        if op.tag == "add_rec":
+            sid = int(op.find("site-id").text)
+            if sid not in owned:
+                return self._ok(f"<dns><add_rec>{denied}</add_rec></dns>")
+            rid = self.add_dns(sid, op.find("type").text, op.find("host").text or "", op.find("value").text or "", op.find("opt").text or "")
+            return self._ok(f"<dns><add_rec><result><status>ok</status><id>{rid}</id></result></add_rec></dns>")
+        if op.tag == "del_rec":
+            rid = int(op.find("./filter/id").text)
+            r = self.dns.get(rid)
+            if r is None or r["site_id"] not in owned:
+                return self._ok(f"<dns><del_rec>{denied}</del_rec></dns>")
+            del self.dns[rid]
+            return self._ok(f"<dns><del_rec><result><status>ok</status><id>{rid}</id></result></del_rec></dns>")
+        return self._system_error(1014, "unsupported dns op")
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self._handle)
@@ -140,6 +195,8 @@ class FakePlesk:
                 return self._ok(f"<secret_key><create><result><status>ok</status><key>{new_key}</key></result></create></secret_key>")
             if root.find("./secret_key/delete") is not None:
                 return self._ok("<secret_key><delete><result><status>ok</status></result></delete></secret_key>")
+        if operator == "dns":
+            return self._handle_dns(root, user)
         if operator == "server":
             return self._ok("<server><get><result><status>ok</status><gen_info><server_name>fake</server_name></gen_info></result></get></server>")
         return self._system_error(1014, f"Parser error: unexpected element {operator}")
@@ -256,6 +313,11 @@ async def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     plesk.users["zusatz"] = FakeUser(password="zusatzpw", type="smbuser")
     plesk.users["gesperrt"] = FakeUser(password="pw", status=16)
 
+    plesk.add_dns(100, "A", "example.com.", "192.0.2.1")
+    plesk.add_dns(100, "NS", "example.com.", "ns1.example.net.")
+    plesk.add_dns(100, "MX", "example.com.", "mail.example.com.", "10")
+    plesk.add_dns(100, "CNAME", "www.example.com.", "example.com.")
+    plesk.add_dns(102, "A", "other.example.", "192.0.2.2")
     executor = FakeExecutor(vhosts, {"example_sys": home, "other_sys": other_home})
     settings = Settings.load()
     services = build_services(settings, plesk_transport=plesk.transport(), executor=executor)
@@ -299,7 +361,7 @@ class OAuthFlow:
         self.client_secret = data.get("client_secret")
         return data
 
-    async def authorize(self, *, scope: str | None = "files:read files:write", resource: str | None = "https://mcp.example.com/plesk/mcp", state: str = "xyz") -> tuple[str, str]:
+    async def authorize(self, *, scope: str | None = "files:read files:write dns:read dns:write", resource: str | None = "https://mcp.example.com/plesk/mcp", state: str = "xyz") -> tuple[str, str]:
         verifier, challenge = pkce_pair()
         params = {
             "response_type": "code",
