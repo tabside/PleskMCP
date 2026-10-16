@@ -12,6 +12,8 @@ REQUIRED = {
     "PLESK_SSH_KEY_PATH": "/run/secrets/key",
     "PLESK_SSH_HOST_KEY": "ssh-ed25519 AAAA",
     "DATA_ENCRYPTION_KEY": "x",
+    "DATABASE_URL": "postgresql+asyncpg://pleskmcp:pw@postgres/pleskmcp",
+    "REDIS_URL": "redis://:pw@redis:6379/0",
 }
 
 

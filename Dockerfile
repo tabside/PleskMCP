@@ -2,7 +2,7 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md alembic.ini ./
 COPY pleskmcp ./pleskmcp
 RUN pip install --no-cache-dir . && mkdir -p /data && chown 1000:1000 /data
 
@@ -20,6 +20,8 @@ USER 1000:1000
 VOLUME ["/data"]
 EXPOSE 8000
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s CMD python -c "import os,urllib.request,urllib.parse;u=urllib.parse.urlparse(os.environ['PUBLIC_BASE_URL']);urllib.request.urlopen('http://127.0.0.1:8000'+u.path.rstrip('/')+'/healthz',timeout=4)" || exit 1
+# The api healthcheck; worker and scheduler override it in docker-compose.yml (heartbeat file).
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s CMD python -c "import os,urllib.request,urllib.parse;u=urllib.parse.urlparse(os.environ['PUBLIC_BASE_URL']);urllib.request.urlopen('http://127.0.0.1:8000'+u.path.rstrip('/')+'/healthz',timeout=4)" || exit 1
 
-CMD ["python", "-m", "pleskmcp.server"]
+# Start commands: pleskmcp api | worker | scheduler | migrate | ...
+CMD ["pleskmcp", "api"]

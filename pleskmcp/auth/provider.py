@@ -25,7 +25,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from ..audit import AuditLog
 from ..config import Settings
-from ..store import Store, hash_secret, new_token
+from ..db import Store, hash_secret, new_token
 from . import cimd
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,7 @@ class PleskRefreshToken(RefreshToken):
 class PleskAuthorizationCode(AuthorizationCode):
     plesk_login: str = ""
     code_hash: str = ""
+    revoke_others: bool = False
 
 
 class PleskAuthProvider:
@@ -55,7 +56,7 @@ class PleskAuthProvider:
 
     # ------------------------------------------------------------------ clients
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        cached = self._store.get_client(client_id)
+        cached = await self._store.get_client(client_id)
         if cimd.is_cimd_client_id(client_id):
             if cached is not None and time.time() - cached[2] < cimd.CACHE_TTL:
                 return OAuthClientInformationFull.model_validate(cached[1])
@@ -70,7 +71,7 @@ class PleskAuthProvider:
                     if time.time() - cached[2] < cimd.CACHE_TTL * 24:
                         return OAuthClientInformationFull.model_validate(cached[1])
                 return None
-            self._store.save_client(client_id, "cimd", record)
+            await self._store.save_client(client_id, "cimd", record)
             self._audit.write("client_metadata_fetched", client=client_id, client_name=record.get("client_name"))
             return OAuthClientInformationFull.model_validate(record)
         if cached is None:
@@ -91,7 +92,7 @@ class PleskAuthProvider:
                 raise RegistrationError("invalid_redirect_uri", str(exc)) from exc
         if not client_info.scope:
             client_info.scope = " ".join(self._settings.valid_scopes)
-        self._store.save_client(client_info.client_id, "dcr", client_info.model_dump(mode="json", exclude_none=True))
+        await self._store.save_client(client_info.client_id, "dcr", client_info.model_dump(mode="json", exclude_none=True))
         self._audit.write("client_registered", client=client_info.client_id, client_name=client_info.client_name)
 
     # ---------------------------------------------------------------- authorize
@@ -99,7 +100,7 @@ class PleskAuthProvider:
         resource = self._validate_resource(params.resource)
         scopes = params.scopes or list(self._settings.valid_scopes)
         request_id = secrets.token_urlsafe(24)
-        self._store.save_auth_request(
+        await self._store.save_auth_request(
             request_id,
             client.client_id,
             {
@@ -122,15 +123,19 @@ class PleskAuthProvider:
             raise AuthorizeError("invalid_target", f"This authorization server only issues tokens for {canonical}")
         return canonical
 
-    def load_pending_request(self, request_id: str) -> tuple[str, dict[str, Any]] | None:
-        return self._store.get_auth_request(request_id)
+    async def load_pending_request(self, request_id: str) -> tuple[str, dict[str, Any]] | None:
+        return await self._store.get_auth_request(request_id)
 
-    def complete_login(self, request_id: str, client_id: str, params: dict[str, Any], plesk_login: str) -> str:
-        """Called by the login page after successful Plesk authentication. Returns the redirect URL."""
+    async def complete_login(self, request_id: str, client_id: str, params: dict[str, Any], plesk_login: str, *, revoke_others: bool = False) -> str:
+        """Called by the login page after successful Plesk authentication. Returns the redirect URL.
+
+        revoke_others: the customer ticked "Andere Verbindungen trennen"; every
+        older token family of the login is revoked once the new one exists.
+        """
         from mcp.server.auth.provider import construct_redirect_uri
 
         code = new_token()
-        self._store.save_auth_code(
+        await self._store.save_auth_code(
             code,
             client_id=client_id,
             plesk_login=plesk_login,
@@ -140,16 +145,17 @@ class PleskAuthProvider:
             redirect_uri_explicit=params["redirect_uri_provided_explicitly"],
             resource=params.get("resource"),
             ttl=self._settings.auth_code_ttl,
+            revoke_others=revoke_others,
         )
-        self._store.delete_auth_request(request_id)
+        await self._store.delete_auth_request(request_id)
         return construct_redirect_uri(
             params["redirect_uri"], code=code, state=params.get("state"), iss=self._settings.issuer_url
         )
 
-    def deny_login(self, request_id: str, params: dict[str, Any]) -> str:
+    async def deny_login(self, request_id: str, params: dict[str, Any]) -> str:
         from mcp.server.auth.provider import construct_redirect_uri
 
-        self._store.delete_auth_request(request_id)
+        await self._store.delete_auth_request(request_id)
         return construct_redirect_uri(
             params["redirect_uri"],
             error="access_denied",
@@ -162,7 +168,7 @@ class PleskAuthProvider:
     async def load_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: str
     ) -> PleskAuthorizationCode | None:
-        row = self._store.get_auth_code(authorization_code)
+        row = await self._store.get_auth_code(authorization_code)
         if row is None or row.client_id != client.client_id:
             return None
         if row.used:
@@ -181,15 +187,16 @@ class PleskAuthProvider:
             subject=row.plesk_login,
             plesk_login=row.plesk_login,
             code_hash=row.code_hash,
+            revoke_others=row.revoke_others,
         )
 
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: PleskAuthorizationCode
     ) -> OAuthToken:
-        if not self._store.consume_auth_code(authorization_code.code_hash):
+        if not await self._store.consume_auth_code(authorization_code.code_hash):
             raise TokenError("invalid_grant", "authorization code already used")
         family_id = secrets.token_urlsafe(16)
-        token = self._issue(
+        token = await self._issue(
             client_id=client.client_id,
             plesk_login=authorization_code.plesk_login,
             scopes=authorization_code.scopes,
@@ -199,12 +206,15 @@ class PleskAuthProvider:
         self._audit.write(
             "token_issued", login=authorization_code.plesk_login, client=client.client_id, grant="authorization_code"
         )
+        if authorization_code.revoke_others:
+            revoked = await self._store.revoke_login(authorization_code.plesk_login, except_family=family_id)
+            self._audit.write("tokens_revoked", login=authorization_code.plesk_login, tokens_revoked=revoked, source="login_checkbox", client=client.client_id)
         return token
 
-    def _issue(self, *, client_id: str, plesk_login: str, scopes: list[str], resource: str, family_id: str) -> OAuthToken:
+    async def _issue(self, *, client_id: str, plesk_login: str, scopes: list[str], resource: str, family_id: str) -> OAuthToken:
         access = new_token()
         refresh = new_token()
-        self._store.save_token(
+        await self._store.save_token(
             access,
             kind="access",
             client_id=client_id,
@@ -214,7 +224,7 @@ class PleskAuthProvider:
             family_id=family_id,
             ttl=self._settings.access_token_ttl,
         )
-        self._store.save_token(
+        await self._store.save_token(
             refresh,
             kind="refresh",
             client_id=client_id,
@@ -234,12 +244,12 @@ class PleskAuthProvider:
 
     # ------------------------------------------------------------ refresh tokens
     async def load_refresh_token(self, client: OAuthClientInformationFull, refresh_token: str) -> PleskRefreshToken | None:
-        row = self._store.get_token(refresh_token, "refresh")
+        row = await self._store.get_token(refresh_token, "refresh")
         if row is None or row.client_id != client.client_id or row.revoked:
             return None
         if row.rotated:
             # Reuse of a rotated refresh token: the whole family is compromised (OAuth 2.1 4.3.1).
-            revoked = self._store.revoke_family(row.family_id)
+            revoked = await self._store.revoke_family(row.family_id)
             self._audit.write(
                 "refresh_token_reuse", login=row.plesk_login, client=client.client_id, tokens_revoked=revoked
             )
@@ -259,13 +269,13 @@ class PleskAuthProvider:
     async def exchange_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: PleskRefreshToken, scopes: list[str]
     ) -> OAuthToken:
-        account = self._store.get_account(refresh_token.plesk_login)
+        account = await self._store.get_account(refresh_token.plesk_login)
         if account is None or account.status != "active":
-            self._store.revoke_family(refresh_token.family_id)
+            await self._store.revoke_family(refresh_token.family_id)
             raise TokenError("invalid_grant", "account is no longer active")
-        if not self._store.mark_rotated(refresh_token.token_hash):
+        if not await self._store.mark_rotated(refresh_token.token_hash):
             raise TokenError("invalid_grant", "refresh token already used")
-        token = self._issue(
+        token = await self._issue(
             client_id=client.client_id,
             plesk_login=refresh_token.plesk_login,
             scopes=scopes or refresh_token.scopes,
@@ -277,9 +287,10 @@ class PleskAuthProvider:
 
     # ------------------------------------------------------------- access tokens
     async def load_access_token(self, token: str) -> PleskAccessToken | None:
-        row = self._store.get_token(token, "access")
+        row = await self._store.get_token(token, "access")
         if row is None or row.revoked or row.expires_at < int(time.time()):
             return None
+        await self._store.touch_token(row.token_hash)
         return PleskAccessToken(
             token=token,
             client_id=row.client_id,
@@ -292,10 +303,10 @@ class PleskAuthProvider:
 
     async def revoke_token(self, token: PleskAccessToken | PleskRefreshToken) -> None:
         kind = "refresh" if isinstance(token, RefreshToken) else "access"
-        row = self._store.get_token(token.token, kind)
+        row = await self._store.get_token(token.token, kind)
         if row is None:
             return
-        revoked = self._store.revoke_family(row.family_id)
+        revoked = await self._store.revoke_family(row.family_id)
         self._audit.write("tokens_revoked", login=row.plesk_login, client=row.client_id, tokens_revoked=revoked, source="client")
 
     async def exchange_identity_assertion(self, client: OAuthClientInformationFull, params: Any) -> OAuthToken:

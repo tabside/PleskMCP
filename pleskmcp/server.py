@@ -1,4 +1,4 @@
-"""Starlette application: MCP endpoint, OAuth endpoints, discovery documents, login page.
+"""Starlette application of the api service: MCP endpoint, OAuth, discovery, login and account pages.
 
 Layout for PUBLIC_BASE_URL=https://mcp.example.com/plesk:
 
@@ -8,22 +8,28 @@ Layout for PUBLIC_BASE_URL=https://mcp.example.com/plesk:
     /plesk/.well-known/openid-configuration         issuer-path fallback some clients try
     /plesk/authorize /plesk/token /plesk/register /plesk/revoke   OAuth (MCP SDK)
     /plesk/login                                    this service's login page
+    /plesk/account                                  customer self-service page
     /plesk/mcp                                      MCP Streamable HTTP endpoint (bearer token)
-    /plesk/healthz                                  health check
+    /plesk/healthz  /plesk/readyz  /plesk/metrics   operations
+
+The api never talks to the Plesk server over SSH; tool calls become jobs for
+the worker service (queue.py).
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from pydantic import AnyHttpUrl
+from redis.asyncio import Redis
 from starlette.applications import Starlette
 from starlette.requests import Request
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse, PlainTextResponse, Response
 from starlette.routing import Mount, Route
 
 from mcp.server.auth.handlers.metadata import MetadataHandler, ProtectedResourceMetadataHandler
@@ -36,22 +42,27 @@ from mcp.shared.auth import ProtectedResourceMetadata
 from . import __version__
 from .accounts import AccountService
 from .audit import AuditLog
+from .auth.account import AccountPages
 from .auth.login import LoginPages
 from .auth.provider import PleskAuthProvider
-from .auth.ratelimit import LoginRateLimiter
+from .auth.ratelimit import RedisLimiter
 from .config import Settings
+from .db import Store, make_engine
+from .dbtools import DbRunner, register_db_tools
 from .dns import DnsRunner, register_dns_tools
 from .plesk_api import PleskClient
-from .remote import RemoteExecutor
-from .store import Store
+from .queue import JobQueue
+from .redis_io import make_redis
 from .tools import ToolRunner, register_tools
 
 logger = logging.getLogger(__name__)
 
 INSTRUCTIONS = (
-    "Dieser Server gibt Zugriff auf die Webdateien der Plesk-Abonnements des angemeldeten Kunden. "
-    "Zuerst list_domains aufrufen, dann mit list_dir/read_file arbeiten. Pfade sind immer relativ zum "
-    "Document Root der Domain. Schreibende Tools legen Sicherungen an, delete_file verschiebt in den Papierkorb."
+    "Dieser Server gibt Zugriff auf die Webdateien, DNS-Zonen und (je nach Abo) Datenbanken der Plesk-Abonnements "
+    "des angemeldeten Kunden, für die KI-Zugang gebucht ist. Zuerst list_domains aufrufen, dann mit list_dir/read_file "
+    "arbeiten. Pfade sind immer relativ zum Document Root der Domain. Schreibende Tools legen Sicherungen an "
+    "(list_versions/restore_version, list_changes), delete_file verschiebt in den Papierkorb. Dauert ein Aufruf "
+    "länger, kommt eine job_id zurück; das Ergebnis liefert job_status."
 )
 
 
@@ -59,30 +70,52 @@ INSTRUCTIONS = (
 class Services:
     settings: Settings
     store: Store
+    redis: Redis
     audit: AuditLog
     plesk: PleskClient
     accounts: AccountService
     provider: PleskAuthProvider
-    limiter: LoginRateLimiter
-    executor: RemoteExecutor
+    limiter: RedisLimiter
+    queue: JobQueue
+    runner: ToolRunner
     mcp: MCPServer
+
+    async def close(self) -> None:
+        await self.plesk.aclose()
+        await self.redis.aclose()
+        await self.store.close()
+
+
+def build_core(
+    settings: Settings,
+    *,
+    store: Store | None = None,
+    redis: Redis | None = None,
+    plesk_transport: Any | None = None,
+) -> tuple[Store, Redis, AuditLog, PleskClient, AccountService, JobQueue, RedisLimiter]:
+    """Shared objects of api, worker and scheduler."""
+    if settings.audit_log_file:
+        os.makedirs(os.path.dirname(settings.audit_log_file) or ".", exist_ok=True)
+    store = store or Store(make_engine(settings.database_url))
+    redis = redis or make_redis(settings.redis_url)
+    audit = AuditLog(settings.audit_log_file)
+    plesk = PleskClient(settings.plesk_url, verify_ssl=settings.plesk_verify_ssl, timeout=settings.plesk_timeout, transport=plesk_transport)
+    accounts = AccountService(settings, store, plesk, audit, redis)
+    queue = JobQueue(settings, redis)
+    limiter = RedisLimiter(settings, redis)
+    return store, redis, audit, plesk, accounts, queue, limiter
 
 
 def build_services(
     settings: Settings,
     *,
+    store: Store | None = None,
+    redis: Redis | None = None,
     plesk_transport: Any | None = None,
     cimd_transport: Any | None = None,
-    executor: RemoteExecutor | None = None,
 ) -> Services:
-    os.makedirs(settings.data_dir, exist_ok=True)
-    store = Store(settings.db_path)
-    audit = AuditLog(settings.audit_log_file)
-    plesk = PleskClient(settings.plesk_url, verify_ssl=settings.plesk_verify_ssl, timeout=settings.plesk_timeout, transport=plesk_transport)
-    accounts = AccountService(settings, store, plesk, audit)
+    store, redis, audit, plesk, accounts, queue, limiter = build_core(settings, store=store, redis=redis, plesk_transport=plesk_transport)
     provider = PleskAuthProvider(settings, store, audit, cimd_transport=cimd_transport)
-    limiter = LoginRateLimiter(settings, store)
-    executor = executor or RemoteExecutor(settings)
 
     auth_settings = AuthSettings(
         issuer_url=AnyHttpUrl(settings.issuer_url),
@@ -102,16 +135,75 @@ def build_services(
         auth_server_provider=provider,
         auth=auth_settings,
     )
-    runner = ToolRunner(settings, accounts, executor, audit)
+    runner = ToolRunner(settings, accounts, queue, limiter, audit, redis)
     register_tools(mcp, runner, settings)
-    register_dns_tools(mcp, DnsRunner(settings, accounts, plesk, executor, audit, runner))
-    return Services(settings, store, audit, plesk, accounts, provider, limiter, executor, mcp)
+    register_dns_tools(mcp, DnsRunner(runner, plesk))
+    register_db_tools(mcp, DbRunner(runner, store, accounts, plesk))
+    return Services(settings, store, redis, audit, plesk, accounts, provider, limiter, queue, runner, mcp)
+
+
+async def readiness(services: Services) -> tuple[bool, dict[str, Any]]:
+    checks: dict[str, Any] = {}
+    ok = True
+    try:
+        checks["database"] = await services.store.ping()
+    except Exception as exc:  # noqa: BLE001
+        checks["database"] = False
+        checks["database_error"] = exc.__class__.__name__
+    try:
+        checks["redis"] = bool(await services.redis.ping())
+    except Exception as exc:  # noqa: BLE001
+        checks["redis"] = False
+        checks["redis_error"] = exc.__class__.__name__
+    workers = 0
+    if checks.get("redis"):
+        async for _ in services.redis.scan_iter(match="worker:*", count=100):
+            workers += 1
+    checks["workers"] = workers
+    ok = bool(checks.get("database")) and bool(checks.get("redis"))
+    return ok, checks
+
+
+async def metrics_text(services: Services) -> str:
+    """Prometheus text format. No logins, domains or paths as labels."""
+    lines = [
+        "# TYPE pleskmcp_info gauge",
+        f'pleskmcp_info{{version="{__version__}"}} 1',
+    ]
+    try:
+        queued = await services.queue.queue_length()
+        running = await services.queue.running_count()
+        workers = 0
+        async for _ in services.redis.scan_iter(match="worker:*", count=100):
+            workers += 1
+        lines += [
+            "# TYPE pleskmcp_jobs_queued gauge",
+            f"pleskmcp_jobs_queued {queued}",
+            "# TYPE pleskmcp_jobs_running gauge",
+            f"pleskmcp_jobs_running {running}",
+            "# TYPE pleskmcp_workers_alive gauge",
+            f"pleskmcp_workers_alive {workers}",
+        ]
+        totals = await services.queue.metrics()
+        lines.append("# TYPE pleskmcp_jobs_total counter")
+        lines.append("# TYPE pleskmcp_job_seconds_total counter")
+        for key, value in sorted(totals.items()):
+            # keys: <op>:ok, <op>:failed, <op>:duration_sum, <op>:count
+            op, _, kind = key.rpartition(":")
+            if kind in ("ok", "failed"):
+                lines.append(f'pleskmcp_jobs_total{{op="{op}",status="{kind}"}} {int(value)}')
+            elif kind == "duration_sum":
+                lines.append(f'pleskmcp_job_seconds_total{{op="{op}"}} {value:.3f}')
+    except Exception as exc:  # noqa: BLE001
+        lines.append(f'pleskmcp_metrics_error{{error="{exc.__class__.__name__}"}} 1')
+    return "\n".join(lines) + "\n"
 
 
 def build_app(services: Services) -> Starlette:
     settings = services.settings
     mcp = services.mcp
     login = LoginPages(settings, services.provider, services.accounts, services.limiter, services.audit)
+    account = AccountPages(settings, services.store, services.accounts, services.limiter, services.audit, services.redis)
 
     @mcp.custom_route("/login", methods=["GET"])
     async def login_get(request: Request) -> Response:
@@ -121,13 +213,44 @@ def build_app(services: Services) -> Starlette:
     async def login_post(request: Request) -> Response:
         return await login.post(request)
 
+    @mcp.custom_route("/account", methods=["GET"])
+    async def account_get(request: Request) -> Response:
+        return await account.get(request)
+
+    @mcp.custom_route("/account/login", methods=["POST"])
+    async def account_login(request: Request) -> Response:
+        return await account.post_login(request)
+
+    @mcp.custom_route("/account/logout", methods=["POST"])
+    async def account_logout(request: Request) -> Response:
+        return await account.post_logout(request)
+
+    @mcp.custom_route("/account/disconnect", methods=["POST"])
+    async def account_disconnect(request: Request) -> Response:
+        return await account.post_disconnect(request)
+
+    @mcp.custom_route("/account/db", methods=["POST"])
+    async def account_db(request: Request) -> Response:
+        return await account.post_db(request)
+
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(request: Request) -> Response:
-        return JSONResponse({"status": "ok", "version": __version__})
+        return JSONResponse({"status": "ok", "version": __version__, "time": int(time.time())})
+
+    @mcp.custom_route("/readyz", methods=["GET"])
+    async def readyz(request: Request) -> Response:
+        ok, checks = await readiness(services)
+        return JSONResponse({"status": "ok" if ok else "degraded", "checks": checks}, status_code=200 if ok else 503)
+
+    if settings.metrics_enabled:
+
+        @mcp.custom_route("/metrics", methods=["GET"])
+        async def metrics(request: Request) -> Response:
+            return PlainTextResponse(await metrics_text(services), media_type="text/plain; version=0.0.4")
 
     @mcp.custom_route("/", methods=["GET"])
     async def index(request: Request) -> Response:
-        return JSONResponse({"service": settings.service_name, "mcp_endpoint": settings.resource_url, "version": __version__})
+        return JSONResponse({"service": settings.service_name, "mcp_endpoint": settings.resource_url, "account_page": f"{settings.public_base_url}/account", "version": __version__})
 
     transport_security = TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
@@ -164,7 +287,6 @@ def build_app(services: Services) -> Starlette:
     )
     prm_endpoint = cors_middleware(ProtectedResourceMetadataHandler(prm).handle, ["GET", "OPTIONS"])
 
-    # Replace the SDK's metadata route (relative to the mount) with the enriched document.
     inner_routes = list(inner.router.routes)
     for position, route in enumerate(inner_routes):
         if isinstance(route, Route) and route.path == "/.well-known/oauth-authorization-server":
@@ -190,16 +312,40 @@ def build_app(services: Services) -> Starlette:
     return Starlette(routes=[*well_known, Mount(base, app=inner)], lifespan=lifespan)
 
 
-def main() -> None:
-    logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+def create_app() -> Starlette:
+    """Application factory for uvicorn workers (`API_WORKERS` > 1): every process builds its own services."""
+    from .logging_setup import configure_logging
+
+    configure_logging("api")
     settings = Settings.load()
-    services = build_services(settings)
-    app = build_app(services)
+    return build_app(build_services(settings))
+
+
+def run_api(settings: Settings) -> None:
     import uvicorn
 
-    trusted = os.environ.get("TRUSTED_PROXIES", "127.0.0.1")
-    logger.info("PleskMCP %s listening on %s:%s, public URL %s", __version__, settings.host, settings.port, settings.public_base_url)
-    uvicorn.run(app, host=settings.host, port=settings.port, proxy_headers=True, forwarded_allow_ips=trusted, log_level="info")
+    workers = int(os.environ.get("API_WORKERS", "1") or "1")
+    logger.info("PleskMCP api %s listening on %s:%s (%d process(es)), public URL %s", __version__, settings.host, settings.port, workers, settings.public_base_url)
+    options: dict[str, Any] = {
+        "host": settings.host,
+        "port": settings.port,
+        "proxy_headers": True,
+        "forwarded_allow_ips": settings.trusted_proxies,
+        "log_level": "info",
+        "log_config": None,
+        "timeout_graceful_shutdown": int(settings.tool_sync_wait) + 5,
+    }
+    if workers > 1:
+        uvicorn.run("pleskmcp.server:create_app", factory=True, workers=workers, **options)
+    else:
+        uvicorn.run(build_app(build_services(settings)), **options)
+
+
+def main() -> None:  # pragma: no cover - entry point kept for `python -m pleskmcp.server`
+    from .logging_setup import configure_logging
+
+    configure_logging("api")
+    run_api(Settings.load())
 
 
 if __name__ == "__main__":

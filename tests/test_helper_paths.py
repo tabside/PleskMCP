@@ -99,8 +99,9 @@ def test_write_backup_and_replace(ws_factory):
     assert (home / "httpdocs" / "new" / "dir" / "file.txt").read_text() == "hello"
     result = run(module, ws, "write_file", path="new/dir/file.txt", content="hello world")
     assert result["backup"]
-    backups = list((home / ".pleskmcp" / "backups" / "example.com").iterdir())
-    assert len(backups) == 1 and backups[0].read_text() == "hello"
+    versions = run(module, ws, "list_versions", path="new/dir/file.txt")["versions"]
+    assert len(versions) == 1 and versions[0]["id"] == result["backup"]
+    assert (home / ".pleskmcp" / "versions" / result["backup"] / "payload").read_text() == "hello"
     assert oct((home / ".pleskmcp").stat().st_mode & 0o777) == "0o700"
     with pytest.raises(module.HelperError, match="use create_dirs"):
         run(module, ws, "write_file", path="missing/file.txt", content="x")

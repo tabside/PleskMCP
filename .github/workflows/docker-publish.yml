@@ -19,7 +19,7 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install -e ".[dev]"
-      - name: Helper script must stay Python 3.6 compatible (syntax check)
+      - name: Helper script must stay Python 3.6 compatible (syntax check, stdlib only)
         run: |
           python - <<'EOF'
           import ast, sys
@@ -30,13 +30,24 @@ jobs:
               if type(node).__name__ in banned:
                   sys.exit(f"helper uses a {banned[type(node).__name__]} (not Python 3.6 compatible)")
           assert "from __future__ import annotations" not in src
+          stdlib = set(sys.stdlib_module_names)
+          for node in ast.walk(tree):
+              names = []
+              if isinstance(node, ast.Import):
+                  names = [a.name.split(".")[0] for a in node.names]
+              elif isinstance(node, ast.ImportFrom) and node.module:
+                  names = [node.module.split(".")[0]]
+              for name in names:
+                  if name not in stdlib:
+                      sys.exit(f"helper imports {name}, which is not in the standard library")
           EOF
-      - name: Tests (as the unprivileged runner user)
+      - name: Lint
+        run: python -m pyflakes pleskmcp helper/pleskmcp_helper.py
+      - name: Tests (the runner user is unprivileged; Redis and Postgres are faked)
         run: python -m pytest -q
 
   build-and-push:
     needs: test
-    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -58,15 +69,41 @@ jobs:
         id: image
         run: echo "name=${REGISTRY}/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
 
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image for the smoke test
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: pleskmcp:smoke
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            APP_VERSION=${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test the three start commands
+        run: |
+          docker run --rm pleskmcp:smoke pleskmcp --help | tee /tmp/help.txt
+          grep -q ' api' /tmp/help.txt && grep -q 'worker' /tmp/help.txt && grep -q 'scheduler' /tmp/help.txt
+          # each command fails fast with a configuration error (exit 2) instead of crashing
+          for cmd in api worker scheduler; do
+            set +e; docker run --rm pleskmcp:smoke pleskmcp "$cmd" >/tmp/out.txt 2>&1; rc=$?; set -e
+            grep -q 'configuration error' /tmp/out.txt && test "$rc" = 2
+          done
+          docker run --rm pleskmcp:smoke pleskmcp generate-key | grep -Eq '^[A-Za-z0-9_=-]{44}$'
+
       - uses: docker/login-action@v3
+        if: github.event_name != 'pull_request'
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/build-push-action@v6
+      - name: Push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
