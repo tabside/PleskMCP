@@ -42,7 +42,9 @@ async def test_full_flow_and_tools(env: Env, flow: OAuthFlow):
 
     result = await call_tool(env.client, access, "list_domains", {})
     names = [d["name"] for d in result["structuredContent"]["domains"]]
-    assert names == ["example.com", "shop.example.com"]
+    # plain.example has no plan or add-on with an access profile and is not listed
+    assert names == ["example.com", "data.example", "shop.example.com"]
+    assert all("files:read" in d["scopes"] for d in result["structuredContent"]["domains"])
 
     listing = await call_tool(env.client, access, "list_dir", {"domain": "example.com", "path": ""})
     assert {e["name"] for e in listing["structuredContent"]["entries"]} == {"index.php", "wp-config.php", "assets"}
@@ -66,7 +68,7 @@ async def test_full_flow_and_tools(env: Env, flow: OAuthFlow):
     # every helper call ran as the subscription's system user
     assert {c["sysuser"] for c in env.executor.calls} == {"example_sys"}
     # the customer key was created and stored encrypted, not in clear
-    row = env.services.store.get_account("kunde")
+    row = await env.services.store.get_account("kunde")
     assert row.secret_key_enc and not row.secret_key_enc.startswith("key-")
 
 
@@ -93,7 +95,10 @@ async def test_expired_and_revoked_tokens(env: Env, flow: OAuthFlow):
     assert (await mcp_call(env.client, access, "tools/list")).status_code == 200
 
     # expired
-    env.services.store._conn.execute("UPDATE tokens SET expires_at=? WHERE kind='access'", (int(time.time()) - 1,))
+    from sqlalchemy import text
+
+    async with env.services.store.engine.begin() as conn:
+        await conn.execute(text("UPDATE tokens SET expires_at=:t WHERE kind='access'").bindparams(t=int(time.time()) - 1))
     r = await mcp_call(env.client, access, "tools/list")
     assert r.status_code == 401
 
@@ -138,8 +143,8 @@ async def test_admin_reseller_additional_user_rejected(env: Env, flow: OAuthFlow
         response = await flow.login(location, login, password)
         assert response.status_code == 401, (login, response.status_code)
         assert text in response.text
-    assert env.services.store.get_account("admin") is None
-    assert env.services.store.token_summary() == []
+    assert await env.services.store.get_account("admin") is None
+    assert await env.services.store.token_summary() == []
 
 
 async def test_deny_redirects_with_error(env: Env, flow: OAuthFlow):
@@ -230,7 +235,7 @@ async def test_account_deactivated_after_plesk_rejects_key(env: Env, flow: OAuth
     env.plesk.users["kunde"].status = 16  # customer suspended in Plesk
     result = await call_tool(env.client, tokens["access_token"], "list_dir", {"domain": "example.com"})
     assert result["isError"] and "nicht mehr aktiv" in tool_text(result)
-    assert env.services.store.get_account("kunde").status == "inactive"
+    assert (await env.services.store.get_account("kunde")).status == "inactive"
     assert (await mcp_call(env.client, tokens["access_token"], "tools/list")).status_code == 401
 
 
@@ -238,7 +243,7 @@ async def test_suspended_subscription_disappears(env: Env, flow: OAuthFlow):
     tokens = await flow.full_login()
     env.plesk.users["kunde"].domains[0]["suspended"] = True
     result = await call_tool(env.client, tokens["access_token"], "list_domains", {})
-    assert [d["name"] for d in result["structuredContent"]["domains"]] == []
+    assert [d["name"] for d in result["structuredContent"]["domains"]] == ["data.example"]
 
 
 async def test_customer_key_creation_not_permitted(env: Env, flow: OAuthFlow):
@@ -284,7 +289,10 @@ async def test_cimd_client(env: Env, flow: OAuthFlow):
 
     # a document whose client_id does not match its URL is refused
     document["client_id"] = "https://client.example/other.json"
-    env.services.store._conn.execute("DELETE FROM clients")
+    from sqlalchemy import text
+
+    async with env.services.store.engine.begin() as conn:
+        await conn.execute(text("DELETE FROM clients"))
     response = await env.client.get(
         "/plesk/authorize",
         params={"response_type": "code", "client_id": client_id, "redirect_uri": flow.redirect_uri, "code_challenge": "a" * 43, "code_challenge_method": "S256"},

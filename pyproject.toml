@@ -17,16 +17,20 @@ dependencies = [
     "asyncssh>=2.14",
     "cryptography>=42",
     "python-multipart>=0.0.9",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    "redis>=5.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "anyio>=4"]
+dev = ["pytest>=8", "anyio>=4", "fakeredis[lua]>=2.23", "aiosqlite>=0.20", "pyflakes>=3"]
 
 [project.scripts]
 pleskmcp = "pleskmcp.cli:main"
 
 [tool.setuptools]
-packages = ["pleskmcp", "pleskmcp.auth"]
+packages = ["pleskmcp", "pleskmcp.auth", "pleskmcp.migrations", "pleskmcp.migrations.versions"]
 
 [tool.setuptools.dynamic]
 version = { attr = "pleskmcp.__version__" }

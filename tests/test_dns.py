@@ -109,7 +109,7 @@ async def test_locked_types_and_validation(env: Env, flow: OAuthFlow):
 async def test_foreign_record_id_rejected(env: Env, flow: OAuthFlow):
     tokens = await flow.full_login()
     access = tokens["access_token"]
-    foreign_id = next(i for i, r in env.plesk.dns.items() if r["site_id"] == 102)
+    foreign_id = next(i for i, r in env.plesk.dns.items() if r["site_id"] == env.plesk.webspace_id("other.example"))
     for tool, args in [
         ("dns_delete_record", {"domain": "example.com", "record_id": foreign_id, "confirm": True}),
         ("dns_update_record", {"domain": "example.com", "record_id": foreign_id, "value": "192.0.2.3", "confirm": True}),
@@ -138,3 +138,32 @@ async def test_dns_unavailable_in_login_only_mode(env: Env, flow: OAuthFlow):
     env.services.accounts._settings = env.settings.__class__(**{**env.settings.__dict__, "account_check_mode": "login_only"})
     result = await call_tool(env.client, tokens["access_token"], "dns_list_records", {"domain": "example.com"})
     assert result["isError"] and "login_only" in tool_text(result)
+
+
+async def test_dns_restore_zone(env: Env, flow: OAuthFlow):
+    tokens = await flow.full_login()
+    access = tokens["access_token"]
+    # a change creates the export we restore to
+    added = await call_tool(env.client, access, "dns_add_record", {"domain": "example.com", "type": "A", "name": "tmp", "value": "192.0.2.77", "confirm": True})
+    export_id = added["structuredContent"]["backup"].rsplit("/", 1)[-1].replace(".json", "")
+    exports = await call_tool(env.client, access, "dns_restore_zone", {"domain": "example.com"})
+    assert export_id in [e["id"] for e in exports["structuredContent"]["exports"]]
+    preview = await call_tool(env.client, access, "dns_restore_zone", {"domain": "example.com", "export_id": export_id})
+    sc = preview["structuredContent"]
+    assert sc["preview"] is True and [d["host"] for d in sc["delete"]] == ["tmp.example.com."] and sc["add"] == []
+    assert any(r["host"] == "tmp.example.com." for r in env.plesk.dns.values())
+    # the restore also re-creates records that were deleted since the export (the MX), and leaves NS alone
+    mx_id = next(i for i, r in env.plesk.dns.items() if r["type"] == "MX")
+    del env.plesk.dns[mx_id]
+    ns_id = next(i for i, r in env.plesk.dns.items() if r["type"] == "NS")
+    env.plesk.dns[ns_id]["value"] = "ns9.example.net."
+    done = await call_tool(env.client, access, "dns_restore_zone", {"domain": "example.com", "export_id": export_id, "confirm": True})
+    sc = done["structuredContent"]
+    assert sc["preview"] is False and sc["deleted"] == 1 and sc["added"] == 1 and sc["errors"] == [] and sc["backup"]
+    assert not any(r["host"] == "tmp.example.com." for r in env.plesk.dns.values())
+    assert any(r["type"] == "MX" and r["value"] == "mail.example.com." for r in env.plesk.dns.values())
+    assert env.plesk.dns[ns_id]["value"] == "ns9.example.net."
+    result = await call_tool(env.client, access, "dns_restore_zone", {"domain": "example.com", "export_id": "20250101000000-nope00", "confirm": True})
+    assert result["isError"]
+    log = open(env.settings.audit_log_file, encoding="utf-8").read()
+    assert '"event": "dns_restore"' in log

@@ -1,64 +1,225 @@
+# PleskMCP stack: api (MCP/OAuth/account page), worker (SSH helper calls), scheduler,
+# redis (queue, limits, caches) and postgres (clients, tokens, accounts, credentials).
+# One image, different start commands. Portainer: create a stack from this file and
+# paste the variables from .env.example as stack environment variables.
+#
+# Redis and Postgres are reachable only on the internal network "backend"; nothing
+# but the api publishes a port (127.0.0.1:8426 by default, a TLS reverse proxy goes
+# in front). Scale: WORKER_REPLICAS and API_WORKERS (uvicorn processes per api
+# container). Several api containers need a load balancer in front and the port
+# mapping removed; see README "Skalierung".
+
+x-pleskmcp-env: &pleskmcp-env
+  PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+  SERVICE_NAME: ${SERVICE_NAME:-Plesk Files MCP}
+  # Plesk XML API
+  PLESK_URL: ${PLESK_URL}
+  PLESK_VERIFY_SSL: ${PLESK_VERIFY_SSL:-true}
+  PLESK_TIMEOUT: ${PLESK_TIMEOUT:-20}
+  # SSH to the Plesk server as the unprivileged helper user (worker only, but harmless elsewhere)
+  PLESK_SSH_HOST: ${PLESK_SSH_HOST}
+  PLESK_SSH_PORT: ${PLESK_SSH_PORT:-22}
+  PLESK_SSH_USER: ${PLESK_SSH_USER:-pleskmcp}
+  PLESK_SSH_KEY_PATH: ${PLESK_SSH_KEY_PATH:-/run/secrets/pleskmcp_ssh_key}
+  PLESK_SSH_HOST_KEY: ${PLESK_SSH_HOST_KEY:-}
+  PLESK_SSH_KNOWN_HOSTS: ${PLESK_SSH_KNOWN_HOSTS:-}
+  PLESK_SSH_TIMEOUT: ${PLESK_SSH_TIMEOUT:-60}
+  PLESK_HELPER_PATH: ${PLESK_HELPER_PATH:-/usr/local/bin/pleskmcp-helper}
+  SSH_MAX_CONCURRENCY: ${SSH_MAX_CONCURRENCY:-8}
+  # Shared state
+  DATABASE_URL: postgresql+asyncpg://pleskmcp:${POSTGRES_PASSWORD}@postgres:5432/pleskmcp
+  REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+  # Account status checks: customer_key | admin_key | login_only
+  ACCOUNT_CHECK_MODE: ${ACCOUNT_CHECK_MODE:-customer_key}
+  ACCOUNT_CHECK_TTL: ${ACCOUNT_CHECK_TTL:-60}
+  CUSTOMER_KEY_IP: ${CUSTOMER_KEY_IP:-}
+  DATA_ENCRYPTION_KEY: ${DATA_ENCRYPTION_KEY:-}
+  PLESK_ADMIN_API_KEY: ${PLESK_ADMIN_API_KEY:-}
+  # Access profiles per service plan / add-on (JSON) or a mounted file
+  ACCESS_PROFILES: ${ACCESS_PROFILES:-}
+  ACCESS_PROFILES_FILE: ${ACCESS_PROFILES_FILE:-}
+  PLAN_CACHE_TTL: ${PLAN_CACHE_TTL:-600}
+  # Protected files and databases
+  PROTECTED_FILES: ${PROTECTED_FILES:-}
+  DB_CONFIG_SOURCES: ${DB_CONFIG_SOURCES:-}
+  DB_REDACT_COLUMNS: ${DB_REDACT_COLUMNS:-}
+  DB_MAX_ROWS: ${DB_MAX_ROWS:-500}
+  DB_MAX_AFFECTED_ROWS: ${DB_MAX_AFFECTED_ROWS:-1000}
+  DB_QUERY_TIME_LIMIT: ${DB_QUERY_TIME_LIMIT:-20}
+  DB_MANAGEMENT_ENABLED: ${DB_MANAGEMENT_ENABLED:-false}
+  MAX_DATABASES_CREATED: ${MAX_DATABASES_CREATED:-3}
+  # Tokens and sessions
+  ACCESS_TOKEN_TTL: ${ACCESS_TOKEN_TTL:-1800}
+  REFRESH_TOKEN_TTL: ${REFRESH_TOKEN_TTL:-2592000}
+  ACCOUNT_SESSION_TTL: ${ACCOUNT_SESSION_TTL:-900}
+  # Limits
+  READ_MAX_BYTES: ${READ_MAX_BYTES:-2097152}
+  WRITE_MAX_BYTES: ${WRITE_MAX_BYTES:-5242880}
+  LIST_MAX_ENTRIES: ${LIST_MAX_ENTRIES:-2000}
+  LOG_MAX_LINES: ${LOG_MAX_LINES:-500}
+  LOG_MAX_SCAN_BYTES: ${LOG_MAX_SCAN_BYTES:-209715200}
+  BACKUP_MAX_FILE_BYTES: ${BACKUP_MAX_FILE_BYTES:-20971520}
+  TOOL_CALLS_PER_MINUTE: ${TOOL_CALLS_PER_MINUTE:-60}
+  TOOL_WRITES_PER_MINUTE: ${TOOL_WRITES_PER_MINUTE:-30}
+  WRITE_BYTES_PER_HOUR: ${WRITE_BYTES_PER_HOUR:-209715200}
+  # Jobs
+  TOOL_SYNC_WAIT: ${TOOL_SYNC_WAIT:-25}
+  JOB_RESULT_TTL: ${JOB_RESULT_TTL:-3600}
+  LOGIN_MAX_CONCURRENCY: ${LOGIN_MAX_CONCURRENCY:-2}
+  HELPER_TIME_LIMIT: ${HELPER_TIME_LIMIT:-30}
+  JOB_TIME_LIMIT: ${JOB_TIME_LIMIT:-300}
+  # Retention and quota
+  TRASH_RETENTION_DAYS: ${TRASH_RETENTION_DAYS:-30}
+  BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-30}
+  BACKUP_MIN_KEEP_DAYS: ${BACKUP_MIN_KEEP_DAYS:-7}
+  STORE_MAX_PERCENT: ${STORE_MAX_PERCENT:-10}
+  STORE_MAX_BYTES: ${STORE_MAX_BYTES:-1073741824}
+  RETENTION_INTERVAL_HOURS: ${RETENTION_INTERVAL_HOURS:-6}
+  QUOTA_CACHE_TTL: ${QUOTA_CACHE_TTL:-600}
+  # Login rate limits; PLESK_FAIL_BUDGET=0 disables the global budget (see README)
+  LOGIN_FAIL_LIMIT_IP: ${LOGIN_FAIL_LIMIT_IP:-10}
+  LOGIN_FAIL_LIMIT_LOGIN: ${LOGIN_FAIL_LIMIT_LOGIN:-5}
+  LOGIN_FAIL_WINDOW: ${LOGIN_FAIL_WINDOW:-900}
+  PLESK_FAIL_BUDGET: ${PLESK_FAIL_BUDGET:-4}
+  PLESK_FAIL_BUDGET_WINDOW: ${PLESK_FAIL_BUDGET_WINDOW:-600}
+  # HTTP
+  TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1}
+  METRICS_ENABLED: ${METRICS_ENABLED:-true}
+  AUDIT_LOG_FILE: ${AUDIT_LOG_FILE:-/data/audit.log}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  LOG_FORMAT: ${LOG_FORMAT:-json}
+  DATA_DIR: /data
+  MCP_HOST: 0.0.0.0
+  MCP_PORT: 8000
+
+x-pleskmcp-service: &pleskmcp-service
+  image: ghcr.io/tabside/pleskmcp:${PLESKMCP_TAG:-latest}
+  pull_policy: always
+  restart: unless-stopped
+  environment: *pleskmcp-env
+  volumes:
+    - pleskmcp-data:/data
+  secrets:
+    - pleskmcp_ssh_key
+  networks:
+    - backend
+  stop_grace_period: 60s
+
 services:
-  pleskmcp:
-    # Image built and published by GitHub Actions on every push to main
-    # (.github/workflows/docker-publish.yml). If the GHCR package is private,
-    # add a ghcr.io registry with a read:packages token in Portainer.
-    image: ghcr.io/tabside/pleskmcp:latest
-    pull_policy: always
-    container_name: pleskmcp
+  migrate:
+    <<: *pleskmcp-service
+    command: ["pleskmcp", "migrate"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    <<: *pleskmcp-service
+    command: ["pleskmcp", "api"]
+    environment:
+      <<: *pleskmcp-env
+      API_WORKERS: ${API_WORKERS:-2}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    ports:
+      # localhost only; a reverse proxy with TLS terminates in front
+      - "${MCP_BIND_ADDR:-127.0.0.1}:${MCP_HOST_PORT:-8426}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,urllib.request,urllib.parse;u=urllib.parse.urlparse(os.environ['PUBLIC_BASE_URL']);urllib.request.urlopen('http://127.0.0.1:8000'+u.path.rstrip('/')+'/healthz',timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
+
+  worker:
+    <<: *pleskmcp-service
+    command: ["pleskmcp", "worker"]
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # the worker touches its heartbeat file every 10 s (and its Redis heartbeat key)
+      test: ["CMD", "python", "-c", "import os,sys,time;sys.exit(0 if time.time()-os.stat('/tmp/pleskmcp-heartbeat').st_mtime<90 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  scheduler:
+    <<: *pleskmcp-service
+    command: ["pleskmcp", "scheduler"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,sys,time;sys.exit(0 if time.time()-os.stat('/tmp/pleskmcp-heartbeat').st_mtime<90 else 1)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD}
+      - --appendonly
+      - "yes"
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - noeviction
+      - --save
+      - ""
+    volumes:
+      - pleskmcp-redis:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+  postgres:
+    image: postgres:16-alpine
     restart: unless-stopped
     environment:
-      # Public URL of this service (path prefix allowed), e.g. https://mcp.example.com/plesk
-      - PUBLIC_BASE_URL=${PUBLIC_BASE_URL}
-      - SERVICE_NAME=${SERVICE_NAME:-Plesk Files MCP}
-      # Plesk XML API
-      - PLESK_URL=${PLESK_URL}
-      - PLESK_VERIFY_SSL=${PLESK_VERIFY_SSL:-true}
-      - PLESK_TIMEOUT=${PLESK_TIMEOUT:-20}
-      # SSH to the Plesk server as the unprivileged helper user
-      - PLESK_SSH_HOST=${PLESK_SSH_HOST}
-      - PLESK_SSH_PORT=${PLESK_SSH_PORT:-22}
-      - PLESK_SSH_USER=${PLESK_SSH_USER:-pleskmcp}
-      - PLESK_SSH_KEY_PATH=${PLESK_SSH_KEY_PATH:-/run/secrets/pleskmcp_ssh_key}
-      - PLESK_SSH_HOST_KEY=${PLESK_SSH_HOST_KEY:-}
-      - PLESK_SSH_KNOWN_HOSTS=${PLESK_SSH_KNOWN_HOSTS:-}
-      - PLESK_SSH_TIMEOUT=${PLESK_SSH_TIMEOUT:-60}
-      - PLESK_HELPER_PATH=${PLESK_HELPER_PATH:-/usr/local/bin/pleskmcp-helper}
-      # Account status checks: customer_key | admin_key | login_only
-      - ACCOUNT_CHECK_MODE=${ACCOUNT_CHECK_MODE:-customer_key}
-      - ACCOUNT_CHECK_TTL=${ACCOUNT_CHECK_TTL:-60}
-      - CUSTOMER_KEY_IP=${CUSTOMER_KEY_IP:-}
-      - DATA_ENCRYPTION_KEY=${DATA_ENCRYPTION_KEY:-}
-      - PLESK_ADMIN_API_KEY=${PLESK_ADMIN_API_KEY:-}
-      # Tokens and limits
-      - ACCESS_TOKEN_TTL=${ACCESS_TOKEN_TTL:-1800}
-      - REFRESH_TOKEN_TTL=${REFRESH_TOKEN_TTL:-2592000}
-      - READ_MAX_BYTES=${READ_MAX_BYTES:-2097152}
-      - WRITE_MAX_BYTES=${WRITE_MAX_BYTES:-5242880}
-      - LIST_MAX_ENTRIES=${LIST_MAX_ENTRIES:-2000}
-      - LOG_MAX_LINES=${LOG_MAX_LINES:-500}
-      - LOGIN_FAIL_LIMIT_IP=${LOGIN_FAIL_LIMIT_IP:-10}
-      - LOGIN_FAIL_LIMIT_LOGIN=${LOGIN_FAIL_LIMIT_LOGIN:-5}
-      - LOGIN_FAIL_WINDOW=${LOGIN_FAIL_WINDOW:-900}
-      - PLESK_FAIL_BUDGET=${PLESK_FAIL_BUDGET:-4}
-      - PLESK_FAIL_BUDGET_WINDOW=${PLESK_FAIL_BUDGET_WINDOW:-600}
-      # Reverse proxy IP(s) whose X-Forwarded-For is trusted (client IP for rate limits and audit)
-      - TRUSTED_PROXIES=${TRUSTED_PROXIES:-127.0.0.1}
-      - AUDIT_LOG_FILE=${AUDIT_LOG_FILE:-/data/audit.log}
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - DATA_DIR=/data
-      - MCP_HOST=0.0.0.0
-      - MCP_PORT=8000
+      POSTGRES_DB: pleskmcp
+      POSTGRES_USER: pleskmcp
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     volumes:
-      - pleskmcp-data:/data
-    secrets:
-      - pleskmcp_ssh_key
-    ports:
-      # Bind to localhost only; a reverse proxy with TLS terminates in front.
-      - "${MCP_BIND_ADDR:-127.0.0.1}:${MCP_HOST_PORT:-8426}:8000"
+      - pleskmcp-postgres:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pleskmcp -d pleskmcp"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
 volumes:
   pleskmcp-data:
+  pleskmcp-redis:
+  pleskmcp-postgres:
+
+networks:
+  backend:
+    internal: false  # api needs outbound access (Plesk API); redis/postgres publish no ports
 
 secrets:
   pleskmcp_ssh_key:
