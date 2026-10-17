@@ -122,10 +122,10 @@ Mit `SIGNUP_ENABLED=true` nimmt die api Bestellungen für den Plan "AI Hosting" 
 
 ```
 Website /ki-hosting/bestellen/  --POST /signup-->  api: Prüfungen, Bestellung (awaiting_payment)
-                                                    |-- bexio: Kontakt per E-Mail suchen oder anlegen
-                                                    |-- reBill: Abo (jährlich, lead_months 1, run_now) -> erste Rechnung sofort
+                                                    |-- reBill: Abo (jährlich, lead_months 1, run_now) -> erste Rechnung sofort;
+                                                    |          reBill sucht den bexio-Kontakt per E-Mail oder legt ihn an
                                                     `-- Zammad: Ticket in "Web TAB", Kunde = Besteller, nur interne Notizen
-scheduler alle 5 min:  offene Bestellungen -> neueste Rechnung des Abos (reBill) -> Status in bexio (9 = bezahlt)
+scheduler alle 5 min:  offene Bestellungen -> reBill POST /subscriptions/{ref}/sync-payments (holt den Status aus bexio) -> neueste Rechnung bezahlt?
    bezahlt -> Freischaltung (Lock pro Bestellung, jeder Schritt nur einmal):
      1. neue Domain: Owner-Kontakt aus den Formulardaten bei Netim anlegen, Domain 1 Jahr registrieren, Auto-Renew aus
      2. Plesk: Kunde (Login aus dem Namen, kollisionsfrei) und Abonnement mit Plan "AI Hosting" (Zufallspasswort, nirgends gespeichert)
@@ -177,7 +177,7 @@ Verifiziert am reBill-Quelltext (`app/Http/Controllers/Api/SubscriptionApiContro
 * Positionen: `AI Hosting {{year}}/{{nextYear}}` (Textvariablen von reBill) zu CHF 60.00 und bei neuer Domain `Domain <name>` zum Listenpreis; `mwst_type 0` (inkl. MwSt), `currency_id 1`. Steuer, Konto und Einheit kommen aus den Organisationsdefaults von reBill (müssen dort gesetzt sein, sonst 422).
 * `external_ref` = `aihosting-<bestell-id>`: ein zweiter Aufruf liefert 409 mit dem bestehenden Abo, die Bestellung bleibt eindeutig.
 
-Zahlungsstatus kommt direkt aus bexio (`GET /2.0/kb_invoice/{id}`, `kb_item_status_id`; `BEXIO_PAID_STATUS_IDS` Standard 9, `BEXIO_CANCELLED_STATUS_IDS` Standard 19), nicht aus dem täglichen Payment-Sync von reBill. Die Rechnungs-ID liefert `GET /subscriptions/{ref}` (`invoices[]`, neueste zuerst nach `created_at`).
+Zahlungsstatus: Der Dienst hat keinen eigenen bexio-Zugang. Er ruft `POST /subscriptions/{ref}/sync-payments` von reBill auf; reBill holt mit seiner bexio-Verbindung (OAuth) den Status jeder Rechnung des Abos (`kb_item_status_id`, 9 = bezahlt, 19 = storniert) und liefert das Abo mit `invoices[]` zurück (neueste nach `created_at`). Der Kontakt läuft ebenso über reBill: `contact` mit Typ, Name, Adresse und `country_code`; reBill sucht in bexio per E-Mail (genau ein Treffer wird verwendet, mehrere ergeben 422 und damit `needs_attention`), sonst legt es den Kontakt beim ersten Rechnungslauf an. `contact_bexio_id` aus der Antwort wird in der Bestellung gespeichert.
 
 ### Sperren, Löschen, Kündigung
 
@@ -190,7 +190,7 @@ Zahlungsstatus kommt direkt aus bexio (`GET /2.0/kb_invoice/{id}`, `kb_item_stat
 
 1. Plesk: eigenen Admin-Secret-Key mit Schreibrechten anlegen (`plesk bin secret_key -c -ip-address <docker host ip> -description "PleskMCP signup"`) als `PLESK_SIGNUP_API_KEY`; er dient der XML API und als `X-API-Key` der REST API (Backup vor der Löschung). Der bestehende `PLESK_ADMIN_API_KEY` bleibt lesend. Plan "AI Hosting" muss existieren (`SIGNUP_PLAN_NAME`), `PLESK_SIGNUP_IP` ist die IP, auf der Abos angelegt werden. `ACCESS_PROFILES` braucht einen Eintrag für den Plan, sonst hat der neue Kunde keinen KI-Zugang.
 2. reBill: Token für die Organisation (Settings → API tokens) als `REBILL_API_TOKEN`, `REBILL_API_URL` = `https://<rebill>/api/v1`. Organisationsdefaults für Steuer, Konto und Einheit setzen; Plan muss `yearly` erlauben.
-3. bexio: API-Token mit Kontakt lesen/schreiben und Rechnungen lesen (`BEXIO_API_TOKEN`), `BEXIO_USER_ID` für neu angelegte Kontakte.
+3. bexio: nichts, die Verbindung hat reBill (OAuth der Organisation).
 4. Netim (optional, sonst nur eigene Domains): `NETIM_LOGIN`/`NETIM_SECRET`, Kontakt-IDs Admin/Tech/Billing (isOwner 0), `NETIM_NAMESERVERS`.
 5. Zammad: Token eines Agenten mit Rechten auf die Gruppe (`ZAMMAD_GROUP`, Standard "Web TAB").
 6. SMTP und Absender (`SMTP_*`, `MAIL_FROM`), AGB (`SIGNUP_TERMS_VERSION`, `SIGNUP_TERMS_URL`), Website-Origin (`SIGNUP_ALLOWED_ORIGINS`), Bestätigungsseite (`SIGNUP_SUCCESS_URL`), Admin-Zugang (`SIGNUP_ADMIN_USER`/`-PASSWORD`).
