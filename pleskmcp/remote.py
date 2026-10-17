@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import shlex
 from typing import Any
@@ -53,6 +54,19 @@ class HelperError(Exception):
         self.details = details or {}
 
 
+def ensure_local_username(fallback: str) -> None:
+    """asyncssh insists on knowing the local user name (getpass.getuser()).
+
+    In the container the service runs as uid 1000 without a passwd entry and
+    without USER/LOGNAME, so getuser() raises KeyError and every connection
+    attempt would die with "Unknown local username". The name is only used
+    for %u in ssh config files, so the SSH user name serves as a default.
+    """
+    if not any(os.environ.get(name) for name in ("LOGNAME", "USER", "LNAME", "USERNAME")):
+        os.environ["USER"] = fallback
+        os.environ["LOGNAME"] = fallback
+
+
 def validate_sysuser(sysuser: str) -> str:
     if not SYSUSER_RE.match(sysuser) or sysuser == "root":
         raise HelperError("bad_sysuser", "invalid system user name")
@@ -83,6 +97,7 @@ class SSHPool:
         self._settings = settings
         self._conn: asyncssh.SSHClientConnection | None = None
         self._connect_lock = asyncio.Lock()
+        ensure_local_username(settings.ssh_user)
 
     def _known_hosts(self) -> Any:
         s = self._settings
@@ -137,7 +152,10 @@ class SSHPool:
             raise RemoteError(f"SSH authentication as {s.ssh_user} refused: {exc}", "ssh_auth") from exc
         except (asyncssh.HostKeyNotVerifiable, asyncssh.KeyExchangeFailed) as exc:
             raise RemoteError(f"SSH host key check failed: {exc.__class__.__name__}: {exc}", "ssh_config") from exc
-        except (OSError, asyncssh.Error, asyncio.TimeoutError, ValueError) as exc:
+        except ValueError as exc:
+            # asyncssh validates its options before connecting (local user name, key types, ...)
+            raise RemoteError(f"SSH client configuration rejected: {exc.__class__.__name__}: {exc}", "ssh_config") from exc
+        except (OSError, asyncssh.Error, asyncio.TimeoutError) as exc:
             raise RemoteError(f"SSH connection failed: {exc.__class__.__name__}: {exc}", "ssh_unreachable") from exc
 
     async def _get_conn(self) -> asyncssh.SSHClientConnection:

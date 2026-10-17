@@ -113,6 +113,31 @@ async def test_ssh_pool_reports_configuration_problems(tmp_path: Path):
     assert "example_sys" not in str(info.value.code)
 
 
+async def test_pool_works_without_local_passwd_entry(tmp_path: Path, monkeypatch):
+    """Inside the container uid 1000 has no passwd entry and no USER variable; asyncssh must still get a local user name."""
+    import getpass
+    import pwd
+
+    import asyncssh
+
+    for name in ("LOGNAME", "USER", "LNAME", "USERNAME"):
+        monkeypatch.delenv(name, raising=False)
+
+    def no_entry(uid):
+        raise KeyError(uid)
+
+    monkeypatch.setattr(pwd, "getpwuid", no_entry)
+    with pytest.raises((KeyError, OSError)):  # KeyError up to Python 3.12, OSError from 3.13
+        getpass.getuser()
+    key = asyncssh.generate_private_key("ssh-ed25519")
+    (tmp_path / "key").write_bytes(key.export_private_key("openssh"))
+    pool = SSHPool(_settings(tmp_path))
+    assert getpass.getuser() == "pleskmcp"
+    with pytest.raises(RemoteError) as info:
+        await pool.run("example_sys", {"op": "ping"}, timeout=2)
+    assert info.value.code == "ssh_unreachable"  # the option check passed; only the port is closed
+
+
 def test_explain_error_messages():
     explain = ToolRunner.explain_error
     assert "[ssh_config]" in explain({"code": "ssh_config", "message": "helper not reachable"})

@@ -271,7 +271,7 @@ Jede Fehlermeldung an den Client endet mit einem Code in eckigen Klammern. Detai
 
 | Code | Bedeutung | Abhilfe |
 |---|---|---|
-| `ssh_config` | Der Worker kann den privaten Schlüssel (`PLESK_SSH_KEY_PATH`) oder den Host-Key (`PLESK_SSH_HOST_KEY`/`PLESK_SSH_KNOWN_HOSTS`) nicht verwenden: Datei fehlt, nicht lesbar, Schlüssel mit Passphrase, falsches Format. | `/readyz` zeigt unter `ssh_preflight_errors` die genaue Ursache (der Worker prüft beides beim Start). `pleskmcp check` im Container. Schlüssel ohne Passphrase (`ssh-keygen -N ""`), Host-Key nur als `typ base64`. |
+| `ssh_config` | Der Worker kann den privaten Schlüssel (`PLESK_SSH_KEY_PATH`) oder den Host-Key (`PLESK_SSH_HOST_KEY`/`PLESK_SSH_KNOWN_HOSTS`) nicht verwenden (Datei fehlt, nicht lesbar, Schlüssel mit Passphrase, falsches Format), oder asyncssh lehnt die Client-Optionen ab (z.B. kein lokaler Benutzername: der Container setzt dafür `USER`/`LOGNAME`, da uid 1000 keinen passwd-Eintrag hat). | `/readyz` zeigt unter `ssh_preflight_errors` die genaue Ursache (der Worker prüft beides beim Start). `pleskmcp check` im Container. Schlüssel ohne Passphrase (`ssh-keygen -N ""`), Host-Key nur als `typ base64`. |
 | `ssh_auth` | Der Plesk-Server lehnt den Schlüssel ab. | `install.sh` mit dem passenden Public Key erneut ausführen; `authorized_keys` des Benutzers `pleskmcp` prüfen. |
 | `ssh_unreachable` | Verbindung zum Plesk-Server scheitert oder bricht ab (Netz, Firewall, Port, Timeout). | Erreichbarkeit von `PLESK_SSH_HOST:PLESK_SSH_PORT` aus dem Worker-Container prüfen. |
 | `sudo_refused` | sudoers-Regel fehlt oder passt nicht zum Systembenutzer. | `install.sh` erneut ausführen; `/var/log/secure` auf dem Plesk-Server zeigt den abgelehnten Aufruf. |
