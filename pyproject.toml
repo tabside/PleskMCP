@@ -30,7 +30,11 @@ dev = ["pytest>=8", "anyio>=4", "fakeredis[lua]>=2.23", "aiosqlite>=0.20", "pyfl
 pleskmcp = "pleskmcp.cli:main"
 
 [tool.setuptools]
-packages = ["pleskmcp", "pleskmcp.auth", "pleskmcp.migrations", "pleskmcp.migrations.versions"]
+packages = ["pleskmcp", "pleskmcp.auth", "pleskmcp.migrations", "pleskmcp.migrations.versions", "pleskmcp.signup", "pleskmcp.signup.templates"]
+
+[tool.setuptools.package-data]
+"pleskmcp.signup" = ["data/*.json"]
+"pleskmcp.signup.templates" = ["*.txt"]
 
 [tool.setuptools.dynamic]
 version = { attr = "pleskmcp.__version__" }

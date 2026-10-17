@@ -1,0 +1,36 @@
+Guten Tag {name}
+
+Vielen Dank für Ihre Bestellung. Ihre Zahlung ist eingegangen und Ihr {product} für {domain} ist jetzt freigeschaltet.
+
+1. Passwort setzen und anmelden
+   Mit diesem Link melden Sie sich einmalig ohne Passwort in Plesk an und setzen dort unter "Mein Profil" Ihr eigenes Passwort:
+   {welcome_link}
+   Der Link ist {link_days} Tage gültig und funktioniert nur einmal. Danach melden Sie sich hier an:
+   {panel_url}
+   Benutzername: {login}
+   Falls der Link abgelaufen ist: auf der Anmeldeseite "Passwort vergessen" wählen, dann kommt ein neuer Link an diese E-Mail-Adresse.
+
+2. Domain
+{dns_block}
+
+3. KI-Zugang (Claude, ChatGPT, Claude Code)
+   Ihr Hosting lässt sich direkt mit KI-Anwendungen verbinden. Sie bearbeiten dann Dateien und DNS-Einträge Ihrer Website über eine gesicherte Verbindung. Die Anmeldung erfolgt immer mit Ihrem Plesk-Benutzernamen und -Passwort; nur Ihre eigenen Abonnements sind erreichbar.
+   Adresse des Dienstes: {mcp_url}
+
+   Claude (claude.ai, Desktop, Mobile): Einstellungen > Connectors > Eigenen Connector hinzufügen. Die Adresse oben eintragen, speichern, "Verbinden" klicken und auf der Anmeldeseite Ihre Plesk-Zugangsdaten eingeben.
+
+   ChatGPT: Einstellungen > Connectors > Erweitert > Entwicklermodus einschalten (nicht in allen Plänen verfügbar). Danach unter Connectors "Erstellen" wählen, einen Namen vergeben, die Adresse oben als MCP-Server-URL eintragen, Authentifizierung OAuth, erstellen. Beim ersten Verbinden erscheint die Anmeldeseite.
+
+   Claude Code (Terminal):
+   claude mcp add --transport http plesk {mcp_url}
+
+   Kontoseite: {account_url}
+   Dort sehen Sie, welche Anwendungen verbunden sind, und trennen Verbindungen wieder. Nach einem Passwortwechsel in Plesk dort "Alle trennen" wählen.
+
+4. Rechnung und Laufzeit
+   Das Hosting läuft ein Jahr und verlängert sich automatisch. Die Rechnung für das Folgejahr kommt etwa einen Monat vor Ablauf per E-Mail (QR-Rechnung oder Kreditkarte). Bleibt sie unbezahlt, wird das Hosting {suspend_days} Tage nach Fälligkeit gesperrt.
+
+Bei Fragen antworten Sie einfach auf diese E-Mail.
+
+Freundliche Grüsse
+{sender_name}

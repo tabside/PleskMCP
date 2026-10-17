@@ -5,6 +5,8 @@ Tasks:
 * refresh quota and plan caches of every active account (QUOTA_CACHE_TTL / PLAN_CACHE_TTL)
 * enqueue a low-priority retention job per subscription (RETENTION_INTERVAL_HOURS)
 * requeue jobs whose worker disappeared (every minute)
+* signup (SIGNUP_ENABLED): poll open orders for payment (SIGNUP_PAYMENT_POLL_SECONDS, 5 min),
+  lifecycle of active and suspended orders (SIGNUP_LIFECYCLE_SECONDS, 1 h)
 """
 
 from __future__ import annotations
@@ -33,8 +35,9 @@ LEADER_TTL = 30
 
 
 class Scheduler:
-    def __init__(self, settings: Settings, store: Store, redis: Redis, queue: JobQueue, accounts: AccountService):
+    def __init__(self, settings: Settings, store: Store, redis: Redis, queue: JobQueue, accounts: AccountService, signup: Any | None = None):
         self._settings = settings
+        self._signup = signup
         self._store = store
         self._redis = redis
         self._queue = queue
@@ -97,6 +100,16 @@ class Scheduler:
         if await self._due("retention", self._settings.retention_interval_hours * 3600):
             await self.enqueue_retention()
             ran.append("retention")
+        if self._signup is not None:
+            cfg = self._signup.cfg
+            if await self._due("signup_payments", cfg.payment_poll_seconds):
+                n = await self._signup.run_payment_polls()
+                logger.info("signup: %d open orders checked for payment", n)
+                ran.append("signup_payments")
+            if await self._due("signup_lifecycle", cfg.lifecycle_seconds):
+                n = await self._signup.run_lifecycle()
+                logger.info("signup: lifecycle of %d orders checked", n)
+                ran.append("signup_lifecycle")
         return ran
 
     async def alive_workers(self) -> set[str]:

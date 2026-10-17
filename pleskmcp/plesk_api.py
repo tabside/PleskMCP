@@ -593,3 +593,122 @@ class PleskClient:
         result = results[0]
         if result.status != "ok":
             raise PleskResultError(result.errcode or 0, result.errtext or "")
+
+    # ------------------------------------------------------ administration (signup)
+    # Used by the signup service with its own administrator key (PLESK_SIGNUP_API_KEY).
+    # Status values: 0 active, 16 suspended by the administrator.
+    STATUS_ACTIVE = 0
+    STATUS_SUSPENDED_ADMIN = 16
+
+    async def domain_exists(self, auth: Auth, name: str) -> str | None:
+        """'webspace', 'site' or 'alias' when a domain with this name exists anywhere in Plesk, else None."""
+        wanted = name.lower().rstrip(".")
+        checks = (
+            ("webspace", f"<webspace><get><filter><name>{escape(wanted)}</name></filter><dataset><gen_info/></dataset></get></webspace>", "./webspace/get/result"),
+            ("site", f"<site><get><filter><name>{escape(wanted)}</name></filter><dataset><gen_info/></dataset></get></site>", "./site/get/result"),
+            ("alias", f"<site-alias><get><filter><name>{escape(wanted)}</name></filter></get></site-alias>", "./site-alias/get/result"),
+        )
+        for kind, body, path in checks:
+            root = await self.call(body, auth)
+            for result in self._results(root, path):
+                if result.status == "ok":
+                    return kind
+                if result.errcode not in (ERR_NOT_FOUND, None):
+                    raise PleskResultError(result.errcode or 0, result.errtext or "")
+        return None
+
+    async def customer_exists(self, auth: Auth, login: str) -> bool:
+        return await self.get_customer(login, auth) is not None
+
+    async def customer_add(
+        self,
+        auth: Auth,
+        *,
+        login: str,
+        password: str,
+        pname: str,
+        cname: str | None,
+        email: str,
+        phone: str | None,
+        address: str,
+        city: str,
+        pcode: str,
+        country: str,
+        external_id: str | None = None,
+    ) -> int:
+        """`customer add`; returns the customer id. The password is sent once and never logged."""
+        parts = []
+        if cname:
+            parts.append(f"<cname>{escape(cname)}</cname>")
+        parts += [f"<pname>{escape(pname)}</pname>", f"<login>{escape(login)}</login>", f"<passwd>{escape(password)}</passwd>", "<status>0</status>"]
+        if phone:
+            parts.append(f"<phone>{escape(phone)}</phone>")
+        parts += [f"<email>{escape(email)}</email>", f"<address>{escape(address)}</address>", f"<city>{escape(city)}</city>", f"<pcode>{escape(pcode)}</pcode>", f"<country>{escape(country)}</country>"]
+        if external_id:
+            parts.append(f"<external-id>{escape(external_id)}</external-id>")
+        root = await self.call(f"<customer><add><gen_info>{''.join(parts)}</gen_info></add></customer>", auth)
+        result = self._single(root, "./customer/add/result")
+        if result.id is None:
+            raise PleskError("customer add returned no id")
+        return result.id
+
+    async def customer_set_status(self, auth: Auth, login: str, status: int) -> None:
+        root = await self.call(
+            f"<customer><set><filter><login>{escape(login)}</login></filter><values><gen_info><status>{int(status)}</status></gen_info></values></set></customer>", auth
+        )
+        self._single(root, "./customer/set/result")
+
+    async def customer_del(self, auth: Auth, login: str) -> bool:
+        """`customer del` (removes the customer with all subscriptions). False when the customer no longer exists."""
+        root = await self.call(f"<customer><del><filter><login>{escape(login)}</login></filter></del></customer>", auth)
+        results = self._results(root, "./customer/del/result")
+        if not results:
+            raise PleskError("customer del returned no result")
+        if results[0].status == "ok":
+            return True
+        if results[0].errcode == ERR_NOT_FOUND:
+            return False
+        raise PleskResultError(results[0].errcode or 0, results[0].errtext or "")
+
+    async def webspace_add(self, auth: Auth, *, name: str, owner_login: str, ip_address: str, plan_name: str, ftp_login: str, ftp_password: str) -> int:
+        """`webspace add` with hosting and a service plan; returns the webspace id."""
+        body = (
+            "<webspace><add><gen_setup>"
+            f"<name>{escape(name)}</name><owner-login>{escape(owner_login)}</owner-login><htype>vrt_hst</htype>"
+            f"<ip_address>{escape(ip_address)}</ip_address><status>0</status>"
+            "</gen_setup><hosting><vrt_hst>"
+            f"<property><name>ftp_login</name><value>{escape(ftp_login)}</value></property>"
+            f"<property><name>ftp_password</name><value>{escape(ftp_password)}</value></property>"
+            f"<ip_address>{escape(ip_address)}</ip_address>"
+            f"</vrt_hst></hosting><plan-name>{escape(plan_name)}</plan-name></add></webspace>"
+        )
+        root = await self.call(body, auth)
+        result = self._single(root, "./webspace/add/result")
+        if result.id is None:
+            raise PleskError("webspace add returned no id")
+        return result.id
+
+    async def webspace_del(self, auth: Auth, name: str) -> bool:
+        root = await self.call(f"<webspace><del><filter><name>{escape(name)}</name></filter></del></webspace>", auth)
+        results = self._results(root, "./webspace/del/result")
+        if not results:
+            raise PleskError("webspace del returned no result")
+        if results[0].status == "ok":
+            return True
+        if results[0].errcode == ERR_NOT_FOUND:
+            return False
+        raise PleskResultError(results[0].errcode or 0, results[0].errtext or "")
+
+    async def create_session(self, auth: Auth, *, login: str, user_ip: str, source_server: str | None = None) -> str:
+        """`server create_session`: one-time session token for `login` (administrator key), used with rsession_init.php."""
+        import base64
+
+        data = f"<user_ip>{base64.b64encode(user_ip.encode()).decode()}</user_ip>"
+        if source_server:
+            data += f"<source_server>{base64.b64encode(source_server.encode()).decode()}</source_server>"
+        root = await self.call(f"<server><create_session><login>{escape(login)}</login><data>{data}</data></create_session></server>", auth)
+        result = self._single(root, "./server/create_session/result")
+        token = _text(result.element.find("id"))
+        if not token:
+            raise PleskError("create_session returned no session id")
+        return token
