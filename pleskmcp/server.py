@@ -11,6 +11,7 @@ Layout for PUBLIC_BASE_URL=https://mcp.example.com/plesk:
     /plesk/account                                  customer self-service page
     /plesk/mcp                                      MCP Streamable HTTP endpoint (bearer token)
     /plesk/healthz  /plesk/readyz  /plesk/metrics   operations
+    /plesk/signup/...                               self-signup "AI Hosting" (SIGNUP_ENABLED, signup/web.py)
 
 The api never talks to the Plesk server over SSH; tool calls become jobs for
 the worker service (queue.py).
@@ -54,6 +55,8 @@ from .dns import DnsRunner, register_dns_tools
 from .plesk_api import PleskClient
 from .queue import JobQueue
 from .redis_io import make_redis
+from .signup.build import build_signup
+from .signup.web import SignupPages
 from .tools import ToolRunner, register_tools
 
 logger = logging.getLogger(__name__)
@@ -80,8 +83,11 @@ class Services:
     queue: JobQueue
     runner: ToolRunner
     mcp: MCPServer
+    signup: Any = None  # SignupService or None
 
     async def close(self) -> None:
+        if self.signup is not None:
+            await self.signup.aclose()
         await self.plesk.aclose()
         await self.redis.aclose()
         await self.store.close()
@@ -114,8 +120,11 @@ def build_services(
     redis: Redis | None = None,
     plesk_transport: Any | None = None,
     cimd_transport: Any | None = None,
+    signup_transports: dict[str, Any] | None = None,
+    signup_mailer: Any | None = None,
 ) -> Services:
     store, redis, audit, plesk, accounts, queue, limiter = build_core(settings, store=store, redis=redis, plesk_transport=plesk_transport)
+    signup = build_signup(settings, store, redis, plesk, audit, transports=signup_transports, mailer=signup_mailer)
     provider = PleskAuthProvider(settings, store, audit, cimd_transport=cimd_transport)
 
     auth_settings = AuthSettings(
@@ -140,7 +149,7 @@ def build_services(
     register_tools(mcp, runner, settings)
     register_dns_tools(mcp, DnsRunner(runner, plesk))
     register_db_tools(mcp, DbRunner(runner, store, accounts, plesk))
-    return Services(settings, store, redis, audit, plesk, accounts, provider, limiter, queue, runner, mcp)
+    return Services(settings, store, redis, audit, plesk, accounts, provider, limiter, queue, runner, mcp, signup)
 
 
 async def readiness(services: Services) -> tuple[bool, dict[str, Any]]:
@@ -168,6 +177,8 @@ async def readiness(services: Services) -> tuple[bool, dict[str, Any]]:
             except ValueError:
                 preflight[key.split(":", 1)[1]] = None
     checks["workers"] = workers
+    if services.signup is not None:
+        checks["signup"] = "enabled"
     # SSH self-check of every worker (key file and host key); failures explain "ssh_config" errors
     checks["ssh_preflight"] = "ok" if preflight and all(p and p.get("ok") for p in preflight.values()) else ("failed" if preflight else "unknown")
     failed = [p.get("message") for p in preflight.values() if p and not p.get("ok")]
@@ -245,6 +256,45 @@ def build_app(services: Services) -> Starlette:
     @mcp.custom_route("/account/db", methods=["POST"])
     async def account_db(request: Request) -> Response:
         return await account.post_db(request)
+
+    if services.signup is not None:
+        signup = SignupPages(settings, services.signup, services.limiter, services.redis)
+
+        @mcp.custom_route("/signup", methods=["POST"])
+        async def signup_post(request: Request) -> Response:
+            return await signup.post_order(request)
+
+        @mcp.custom_route("/signup", methods=["OPTIONS"])
+        async def signup_options(request: Request) -> Response:
+            return await signup.options(request)
+
+        @mcp.custom_route("/signup/config", methods=["GET", "OPTIONS"])
+        async def signup_config(request: Request) -> Response:
+            return await signup.options(request) if request.method == "OPTIONS" else await signup.get_config(request)
+
+        @mcp.custom_route("/signup/token", methods=["GET", "OPTIONS"])
+        async def signup_token(request: Request) -> Response:
+            return await signup.options(request) if request.method == "OPTIONS" else await signup.get_token(request)
+
+        @mcp.custom_route("/signup/check-domain", methods=["GET", "OPTIONS"])
+        async def signup_check(request: Request) -> Response:
+            return await signup.options(request) if request.method == "OPTIONS" else await signup.check_domain(request)
+
+        @mcp.custom_route("/signup/thanks/{order_id}", methods=["GET"])
+        async def signup_thanks(request: Request) -> Response:
+            return await signup.thanks(request)
+
+        @mcp.custom_route("/signup/welcome/{token}", methods=["GET"])
+        async def signup_welcome(request: Request) -> Response:
+            return await signup.welcome(request)
+
+        @mcp.custom_route("/signup/admin", methods=["GET"])
+        async def signup_admin(request: Request) -> Response:
+            return await signup.admin(request)
+
+        @mcp.custom_route("/signup/admin/action", methods=["POST"])
+        async def signup_admin_action(request: Request) -> Response:
+            return await signup.admin_action(request)
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(request: Request) -> Response:

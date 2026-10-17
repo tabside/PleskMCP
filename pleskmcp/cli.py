@@ -13,6 +13,7 @@ Operations:
   prune                      delete expired rows now
   report-ownership --domain X | --all   files in the docroot not owned by the system user (read-only helper op)
   generate-key               print a new DATA_ENCRYPTION_KEY
+  signup-orders [--status S] orders of the self-signup (one JSON object per line, no tokens)
   check                      check Plesk API, database, Redis and (optionally) the SSH helper
 """
 
@@ -78,12 +79,17 @@ def cmd_scheduler(args: argparse.Namespace) -> int:
     settings = _settings()
 
     async def run() -> None:
+        from .signup.build import build_signup
+
         store, redis, audit, plesk, accounts, queue, limiter = build_core(settings)
-        scheduler = Scheduler(settings, store, redis, queue, accounts)
+        signup = build_signup(settings, store, redis, plesk, audit)
+        scheduler = Scheduler(settings, store, redis, queue, accounts, signup)
         scheduler.install_signal_handlers()
         try:
             await scheduler.run_forever()
         finally:
+            if signup is not None:
+                await signup.aclose()
             await plesk.aclose()
             await redis.aclose()
             await store.close()
@@ -229,6 +235,25 @@ def cmd_prune(args: argparse.Namespace) -> int:
     return asyncio.run(run())
 
 
+def cmd_signup_orders(args: argparse.Namespace) -> int:
+    from .signup.store import SignupStore
+    from .signup.web import admin_json
+
+    async def run() -> int:
+        store, redis, audit, plesk, accounts, queue, limiter = _core()
+        try:
+            orders = await SignupStore(store.engine).list(status=args.status)
+            if orders:
+                print(admin_json(orders))
+        finally:
+            await plesk.aclose()
+            await redis.aclose()
+            await store.close()
+        return 0
+
+    return asyncio.run(run())
+
+
 def cmd_generate_key(args: argparse.Namespace) -> int:
     print(Fernet.generate_key().decode())
     return 0
@@ -359,6 +384,9 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_connections)
     sub.add_parser("prune").set_defaults(func=cmd_prune)
     sub.add_parser("generate-key").set_defaults(func=cmd_generate_key)
+    p = sub.add_parser("signup-orders", help="orders of the self-signup")
+    p.add_argument("--status")
+    p.set_defaults(func=cmd_signup_orders)
 
     p = sub.add_parser("report-ownership", help="files in a docroot not owned by the system user")
     group = p.add_mutually_exclusive_group(required=True)

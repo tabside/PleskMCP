@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bestellung eingegangen</title>
+<meta name="robots" content="noindex">
+<link rel="stylesheet" href="/assets/signup.css">
+</head>
+<body>
+<main class="aih">
+  <h1>Danke für deine Bestellung</h1>
+  <p class="lead">Deine Bestellung ist eingegangen<span id="aih-order-no"></span>.</p>
+  <p>Die Rechnung kommt in den nächsten Minuten per E-Mail. Du kannst sie mit QR-Rechnung oder Kreditkarte bezahlen.</p>
+  <p>Sobald die Zahlung eingegangen ist, wird dein Hosting automatisch freigeschaltet. Du erhältst dann eine E-Mail mit dem Link zum Setzen deines Passworts, den Angaben zur Domain und der Anleitung für den KI-Zugang.</p>
+  <p class="hint">Keine Rechnung erhalten? Bitte auch den Spam-Ordner prüfen oder uns per E-Mail schreiben.</p>
+  <script>
+    (function () { var m = /[?&]order=([a-f0-9]{16})/.exec(location.search); if (m) document.getElementById("aih-order-no").textContent = " (Bestell-Nr. " + m[1] + ")"; })();
+  </script>
+</main>
+</body>
+</html>

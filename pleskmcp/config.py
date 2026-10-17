@@ -192,6 +192,8 @@ class Settings:
     service_name: str
 
     valid_scopes: list[str] = field(default_factory=lambda: list(VALID_SCOPES))
+    # Self-signup "AI Hosting" (SIGNUP_ENABLED=true; see signup/config.py), None when off
+    signup: Any = None
 
     @property
     def resource_url(self) -> str:
@@ -292,6 +294,10 @@ class Settings:
         except ProfileError as exc:
             raise ConfigError(str(exc)) from exc
 
+        from .signup.config import load_signup_settings
+
+        signup = load_signup_settings(public_base_url=public_base_url, plesk_url=plesk_url, data_encryption_key=enc_key, require_runtime=require_runtime)
+
         data_dir = _env("DATA_DIR", "/data") or "/data"
         return Settings(
             public_base_url=public_base_url,
@@ -364,4 +370,5 @@ class Settings:
             trusted_proxies=_env("TRUSTED_PROXIES", "127.0.0.1") or "127.0.0.1",
             metrics_enabled=_env_bool("METRICS_ENABLED", True),
             service_name=_env("SERVICE_NAME", "Plesk Files MCP") or "Plesk Files MCP",
+            signup=signup,
         )

@@ -39,7 +39,7 @@ Ein Image, mehrere Startbefehle (`pleskmcp api|worker|scheduler|migrate`):
 |---|---|---|
 | `api` | MCP-Endpunkt (Streamable HTTP, zustandslos), OAuth-Endpunkte, Login-Seite, `/account`, `/healthz`, `/readyz`, `/metrics`. Führt keine SSH-Aufrufe aus, sondern stellt pro Tool-Aufruf einen Job in die Queue und wartet bis `TOOL_SYNC_WAIT` (25 s) auf das Ergebnis. Dauert es länger, liefert das Tool eine `job_id`; `job_status(job_id)` holt Status und Ergebnis (nur für den eigenen Login, Ergebnisse verfallen nach `JOB_RESULT_TTL`). | `API_WORKERS` Prozesse pro Container; mehrere Container hinter einem Load-Balancer (Port-Mapping dann entfernen). |
 | `worker` | Nimmt Jobs aus der Queue, führt das Hilfsskript per SSH aus (eine Verbindung, mehrere Kanäle parallel, Reconnect, Kanal-Timeout). `SSH_MAX_CONCURRENCY` (8) parallele Helper-Läufe pro Worker. Heartbeat in Redis und als Datei für den Healthcheck. | `WORKER_REPLICAS` |
-| `scheduler` | Periodische Aufgaben: hängende Jobs zurückstellen (jede Minute), abgelaufene Datenbankzeilen löschen (stündlich), Kontingent- und Plan-Cache auffrischen (`QUOTA_CACHE_TTL`), Aufbewahrungsjob pro Abo mit niedriger Priorität (`RETENTION_INTERVAL_HOURS`, 6 h). Genau eine aktive Instanz über einen Leader-Lock in Redis; weitere Instanzen stehen bereit. | 1 (weitere als Standby) |
+| `scheduler` | Periodische Aufgaben: hängende Jobs zurückstellen (jede Minute), abgelaufene Datenbankzeilen löschen (stündlich), Kontingent- und Plan-Cache auffrischen (`QUOTA_CACHE_TTL`), Aufbewahrungsjob pro Abo mit niedriger Priorität (`RETENTION_INTERVAL_HOURS`, 6 h), bei `SIGNUP_ENABLED` Zahlungsprüfung offener Bestellungen (5 min) und Lebenszyklus aktiver Abos (stündlich). Genau eine aktive Instanz über einen Leader-Lock in Redis; weitere Instanzen stehen bereit. | 1 (weitere als Standby) |
 | `migrate` | Einmaliger Container pro Deploy: `pleskmcp migrate` (Alembic). api und worker starten erst danach. | |
 | `redis` | Queue, Rate-Limits, Concurrency-Zähler, Caches, Sessions der Kontoseite. AOF-Persistenz, `maxmemory` mit `noeviction`, Passwort, kein veröffentlichter Port. | |
 | `postgres` | Clients, Tokens, Auth-Codes, Konten, Login-Versuche, verschlüsselte Datenbank-Zugangsdaten. Passwort, kein veröffentlichter Port. | |
@@ -113,6 +113,91 @@ Nur für Profile mit db-Scopes. Abfragen laufen über das `mysql`-CLI auf dem Pl
 | `db_restore(domain, database, dump_id, confirm)` | `db:write`, Voll-Dumps `db:admin` | Dumps auflisten, Vorschau, zurückspielen (vorher aktuellen Stand dumpen). |
 | `db_create(domain, name_suffix, confirm, write_config_path)` | `db:admin` | Neue Datenbank mit eigenem Benutzer über die XML API im Kundenkontext. Name = erstes Label des Abos + bereinigter Suffix (a-z, 0-9, _). Passwort zufällig (40 Zeichen). Zugangsdaten verschlüsselt in Postgres und als Datei `/var/www/vhosts/<abo>/private/pleskmcp-db/<name>.env` (0600, Ordner 0700, Systembenutzer), optional zusätzlich als `DB_*`-Werte in eine Datei im Docroot (`write_config_path`, danach geschützt). Werte nie im Ergebnis, nie im Audit-Log. Limit `max_databases_created` aus dem Profil, Plesk prüft `max_db`. Nur mit `DB_MANAGEMENT_ENABLED=true`. |
 | `db_drop(domain, database, confirm)` | `db:admin` | Nur vom Dienst angelegte Datenbanken (sonst Ablehnung mit Hinweis auf Plesk). Voll-Dump in den Store, dann Datenbank und Benutzer über die XML API löschen, gespeicherte Zugangsdaten und die Datei entfernen. |
+
+## Self-Signup "AI Hosting"
+
+Mit `SIGNUP_ENABLED=true` nimmt die api Bestellungen für den Plan "AI Hosting" von der Website an, stellt die Rechnung über reBill/bexio, schaltet nach Zahlungseingang automatisch frei und kümmert sich um Sperrung, Löschung und Domain-Verlängerung. Alles läuft im bestehenden Stack: die api liefert die Endpunkte, der Scheduler die periodischen Prüfungen, Postgres hält die Bestellungen (`signup_orders`, `signup_events`), Redis Sperren, Formular-Nonces und Limits. Standardmässig ist das Feature aus.
+
+### Ablauf
+
+```
+Website /ki-hosting/bestellen/  --POST /signup-->  api: Prüfungen, Bestellung (awaiting_payment)
+                                                    |-- bexio: Kontakt per E-Mail suchen oder anlegen
+                                                    |-- reBill: Abo (jährlich, lead_months 1, run_now) -> erste Rechnung sofort
+                                                    `-- Zammad: Ticket in "Web TAB", Kunde = Besteller, nur interne Notizen
+scheduler alle 5 min:  offene Bestellungen -> neueste Rechnung des Abos (reBill) -> Status in bexio (9 = bezahlt)
+   bezahlt -> Freischaltung (Lock pro Bestellung, jeder Schritt nur einmal):
+     1. neue Domain: Owner-Kontakt aus den Formulardaten bei Netim anlegen, Domain 1 Jahr registrieren, Auto-Renew aus
+     2. Plesk: Kunde (Login aus dem Namen, kollisionsfrei) und Abonnement mit Plan "AI Hosting" (Zufallspasswort, nirgends gespeichert)
+     3./4. Willkommensmail: Einmal-Login-Link statt Passwort, Panel-URL, DNS-Angaben, KI-Anleitung, Kontoseite
+     5. Status active, interne Zammad-Notiz "aktiviert" mit Abonnement-ID
+scheduler stündlich:  aktive und gesperrte Bestellungen (Rechnungen, Kündigung, Löschfrist, Domain-Ablauf)
+```
+
+Zustände einer Bestellung:
+
+```
+awaiting_payment --bezahlt--> activating --ok--> active --Rechnung 10 Tage überfällig--> suspended --bezahlt--> active
+                                  |                 |--Abo in reBill deaktiviert, Laufzeit abgelaufen--> suspended
+                                  |                                                                        |--60 Tage--> pending_deletion --Backup bestätigt--> deleted
+                                  |                                                                                        (SIGNUP_DELETE_BACKUP_MODE=none: direkt deleted)
+                                  `--Fehler--> awaiting_payment (nächster Versuch)  --SIGNUP_MAX_ATTEMPTS erreicht oder nicht wiederholbar--> needs_attention --Admin "Erneut versuchen"--> vorheriger Status
+```
+
+`needs_attention` bekommt immer eine interne Zammad-Notiz. Jeder Zustandswechsel steht als Ereignis in `signup_events` und im Audit-Log (nur Bestell-ID, Codes und externe IDs, keine Personendaten).
+
+### Endpunkte
+
+| Pfad | Zweck |
+|---|---|
+| `GET /signup/config` | Preisliste, Länder, AGB-Version (CORS für `SIGNUP_ALLOWED_ORIGINS`) |
+| `GET /signup/token` | Formular-Token: HMAC über Zeitstempel und Nonce, zustandslos; gilt frühestens nach `SIGNUP_MIN_FILL_SECONDS`, höchstens `SIGNUP_TOKEN_MAX_AGE`, einmalig (Nonce in Redis) |
+| `GET /signup/check-domain?domain=` | Live-Verfügbarkeit bei Netim (nur bestellbare Endungen, 60 s Cache, Limit pro IP) |
+| `POST /signup` | Bestellung (JSON oder Formular-POST). Schutz: nur HTTPS, Origin-Prüfung, Honeypot-Feld `website` (Antwort sieht wie Erfolg aus, nichts wird angelegt), Token, Limits pro IP (`SIGNUP_RATE_LIMIT_IP`/h) und pro E-Mail (`SIGNUP_RATE_LIMIT_EMAIL`/Tag), Validierung aller Felder serverseitig. Antworten verraten nie, ob eine E-Mail-Adresse schon Kunde ist. |
+| `GET /signup/thanks/{id}` | eingebaute Bestätigungsseite (wenn `SIGNUP_SUCCESS_URL` leer ist) |
+| `GET /signup/welcome/{token}` | Einmal-Link aus der Willkommensmail: erzeugt per XML API `server create_session` einen Session-Token für den Kunden und leitet auf `rsession_init.php` um; danach ist der Link verbraucht. Abgelaufen oder verbraucht: Hinweis auf "Passwort vergessen" (`get_password.php`). `PLESK_LOGIN_LINK_MODE=reset_page` verlinkt stattdessen direkt die Passwort-vergessen-Seite. |
+| `GET /signup/admin` | Übersicht aller Bestellungen (HTTP Basic, `SIGNUP_ADMIN_USER`/`SIGNUP_ADMIN_PASSWORD`): Status, Rechnung, Plesk, Netim, Verlauf; Aktionen "Erneut versuchen", "Jetzt prüfen", "Backup erledigt, löschen" |
+
+CLI: `pleskmcp signup-orders [--status S]` listet Bestellungen als JSON-Zeilen (ohne Tokens).
+
+### Domains
+
+Eigene Domain: Format geprüft, dann `webspace get`, `site get` und `site-alias get` per Name im Admin-Kontext; existiert die Domain irgendwo in Plesk, wird die Bestellung abgelehnt. Offene Bestellungen anderer Kunden für dieselbe Domain werden ebenfalls abgelehnt; dieselbe E-Mail mit derselben Domain liefert die bestehende Bestellung zurück (keine zweite Rechnung).
+
+Neue Domain: nur Endungen mit `orderable: true` in der Preisliste (`pleskmcp/signup/data/domains.json`, überschreibbar mit `SIGNUP_PRICE_LIST_FILE`; dieselbe Datei rendert `/domains/` auf der Website). `.swiss` steht mit `orderable: false` drin und erscheint als "auf Anfrage". Pro Endung listet `owner_fields`, welche Formularfelder für den Netim-Owner-Kontakt zusätzlich Pflicht sind (bei allen bestellbaren Endungen `phone`, weil Netims `StructContact` die Telefonnummer international verlangt; Netim liefert keine API für diese Regeln, die Liste wird von Hand gepflegt). Netim-Aufrufe (REST 1.0): `POST /session/`, `GET /domain/{d}/check/`, `POST /contact/` (`isOwner: 1`, `bodyForm` IND oder ORG), `POST /domain/{d}/` (idOwner/idAdmin/idTech/idBilling, duration 1, ns1..ns5), `PATCH /domain/{d}/preference/` (`auto_renew` = 0), `GET /operation/{id}`, `GET /domain/{d}/info/`, `PATCH /domain/{d}/renew/`. Eine Registrierung mit Status `Pending` wird stündlich nachgeprüft; `Failed` führt zu `needs_attention`.
+
+Verlängerung: `SIGNUP_DOMAIN_RENEW_DAYS_BEFORE` (30) Tage vor Ablauf verlängert der Scheduler die Domain um ein Jahr, wenn die neueste Rechnung bezahlt und das Abo aktiv ist. Sonst wird nicht verlängert und das Ticket bekommt einmal pro Ablaufdatum eine Notiz.
+
+### reBill: erste Rechnung sofort, Folgerechnung einen Monat vorher
+
+Verifiziert am reBill-Quelltext (`app/Http/Controllers/Api/SubscriptionApiController.php`, `app/Models/RecurringInvoice.php::scheduleAfterRun`, `app/Jobs/ProcessRecurringInvoiceJob.php`):
+
+* `run_now: true` mit `start_date` = heute: der Controller setzt den Lock `recurring:processing:{id}` und dispatcht `ProcessRecurringInvoiceJob` sofort in die Queue (Antwort `first_invoice_queued: true`). Die Rechnung wird in bexio erstellt, ausgestellt und versendet (`auto_issue`/`auto_send` sind fest `true`), ohne auf den täglichen Lauf um 07:00 zu warten. Voraussetzung: der Queue-Worker von reBill läuft.
+* `lead_months: 1`: beim ersten Lauf ist `periodStart` = Laufdatum (heute), `periodEnd` = heute + 1 Jahr - 1 Tag; `nextRun` = Beginn der nächsten Periode minus `lead_months`. Die Folgerechnung wird also einen Monat vor Beginn der neuen Jahresperiode erstellt und gesendet; `next_period_start` in der API-Antwort ist der Beginn dieser Periode, daraus berechnet der Dienst `period_end`.
+* Positionen: `AI Hosting {{year}}/{{nextYear}}` (Textvariablen von reBill) zu CHF 60.00 und bei neuer Domain `Domain <name>` zum Listenpreis; `mwst_type 0` (inkl. MwSt), `currency_id 1`. Steuer, Konto und Einheit kommen aus den Organisationsdefaults von reBill (müssen dort gesetzt sein, sonst 422).
+* `external_ref` = `aihosting-<bestell-id>`: ein zweiter Aufruf liefert 409 mit dem bestehenden Abo, die Bestellung bleibt eindeutig.
+
+Zahlungsstatus kommt direkt aus bexio (`GET /2.0/kb_invoice/{id}`, `kb_item_status_id`; `BEXIO_PAID_STATUS_IDS` Standard 9, `BEXIO_CANCELLED_STATUS_IDS` Standard 19), nicht aus dem täglichen Payment-Sync von reBill. Die Rechnungs-ID liefert `GET /subscriptions/{ref}` (`invoices[]`, neueste zuerst nach `created_at`).
+
+### Sperren, Löschen, Kündigung
+
+* Neueste Rechnung des Abos offen und `SIGNUP_SUSPEND_AFTER_DAYS` (10) Tage nach Fälligkeit: `customer set status 16` (gesperrt durch Administrator), Notiz. Zahlung danach: `status 0`, Notiz.
+* Kündigung: das Abo wird in reBill deaktiviert (`is_active: false`). Der Dienst merkt sich `cancelled_at`, sperrt am Ende der bezahlten Laufzeit (`period_end`) und löscht `SIGNUP_DELETE_AFTER_DAYS` (60) Tage später.
+* Löschung: `SIGNUP_DELETE_BACKUP_MODE=manual` (Standard) setzt `pending_deletion`, schreibt eine Notiz ("Backup erstellen") und wartet auf die Bestätigung in der Admin-Übersicht; `none` löscht direkt. Gelöscht wird `webspace del` plus `customer del`.
+* Schutz gegen Doppelverarbeitung: Redis-Lock `signup:lock:<id>` (10 min) um jede Bestellung, der Scheduler läuft ohnehin nur als Leader.
+
+### Einrichtung
+
+1. Plesk: eigenen Admin-Secret-Key mit Schreibrechten anlegen (`plesk bin secret_key -c -ip-address <docker host ip> -description "PleskMCP signup"`) als `PLESK_SIGNUP_API_KEY`; der bestehende `PLESK_ADMIN_API_KEY` bleibt lesend. Plan "AI Hosting" muss existieren (`SIGNUP_PLAN_NAME`), `PLESK_SIGNUP_IP` ist die IP, auf der Abos angelegt werden. `ACCESS_PROFILES` braucht einen Eintrag für den Plan, sonst hat der neue Kunde keinen KI-Zugang.
+2. reBill: Token für die Organisation (Settings → API tokens) als `REBILL_API_TOKEN`, `REBILL_API_URL` = `https://<rebill>/api/v1`. Organisationsdefaults für Steuer, Konto und Einheit setzen; Plan muss `yearly` erlauben.
+3. bexio: API-Token mit Kontakt lesen/schreiben und Rechnungen lesen (`BEXIO_API_TOKEN`), `BEXIO_USER_ID` für neu angelegte Kontakte.
+4. Netim (optional, sonst nur eigene Domains): `NETIM_LOGIN`/`NETIM_SECRET`, Kontakt-IDs Admin/Tech/Billing (isOwner 0), `NETIM_NAMESERVERS`.
+5. Zammad: Token eines Agenten mit Rechten auf die Gruppe (`ZAMMAD_GROUP`, Standard "Web TAB").
+6. SMTP und Absender (`SMTP_*`, `MAIL_FROM`), AGB (`SIGNUP_TERMS_VERSION`, `SIGNUP_TERMS_URL`), Website-Origin (`SIGNUP_ALLOWED_ORIGINS`), Bestätigungsseite (`SIGNUP_SUCCESS_URL`), Admin-Zugang (`SIGNUP_ADMIN_USER`/`-PASSWORD`).
+7. `pleskmcp migrate` (Migration `0002_signup`), Stack neu starten. `/readyz` zeigt `"signup": "enabled"`.
+8. Website: Dateien aus `website/` ins Website-Repo übernehmen (`website/README.md`), `SIGNUP_BASE` in `assets/signup.js` auf die `PUBLIC_BASE_URL` setzen, `assets/domains.json` mit der Preisliste gleich halten.
+
+Alle Variablen mit Defaults stehen in `.env.example` (Abschnitt Self-Signup). Fehlt bei `SIGNUP_ENABLED=true` eine Pflichtvariable, startet der Dienst nicht und nennt sie.
 
 ## Verifizierte Plesk-Fakten (Plesk Obsidian 18.0.80, CloudLinux 8)
 
@@ -311,6 +396,7 @@ Jede Fehlermeldung an den Client endet mit einem Code in eckigen Klammern. Detai
 | `METRICS_ENABLED` | true | `/metrics` |
 | `LOG_FORMAT` / `LOG_LEVEL` | json / INFO | Logging |
 | `API_WORKERS` / `WORKER_REPLICAS` | 2 / 2 | Skalierung (Compose) |
+| `SIGNUP_ENABLED` | false | Self-Signup "AI Hosting" (eigener Abschnitt; Variablen in `.env.example`) |
 
 Die übrigen Variablen (Plesk-URL, SSH, Token-Laufzeiten, Lese-/Schreiblimits, Login-Limits, Proxy) sind in `.env.example` beschrieben.
 

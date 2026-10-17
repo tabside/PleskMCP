@@ -1,0 +1,30 @@
+{
+  "_comment": "Shared price list: rendered on the website (/domains/) and used by the signup service. Prices in CHF per year incl. VAT. Only entries with orderable=true can be ordered online; the others are shown as 'auf Anfrage'. owner_fields lists the form fields Netim needs for the owner contact of this TLD in addition to name, address and e-mail.",
+  "currency": "CHF",
+  "updated": "2026-10-17",
+  "hosting": {
+    "name": "AI Hosting",
+    "price_per_year": 60.00,
+    "storage_gb": 5,
+    "databases": 0,
+    "features": [
+      "Webspace mit 5 GB Speicher auf einem Plesk-Server in der Schweiz",
+      "KI-Zugang: Claude, ChatGPT und andere MCP-Clients bearbeiten die Website direkt",
+      "Eigene Domain anbinden oder neue Domain gleich mitbestellen",
+      "Jaehrliche Rechnung per E-Mail mit QR-Rechnung oder Kreditkarte"
+    ]
+  },
+  "tlds": [
+    {"tld": "ch", "price_per_year": 13.50, "orderable": true, "owner_fields": ["phone"]},
+    {"tld": "li", "price_per_year": 13.50, "orderable": true, "owner_fields": ["phone"]},
+    {"tld": "com", "price_per_year": 15.00, "orderable": true, "owner_fields": ["phone"]},
+    {"tld": "net", "price_per_year": 18.00, "orderable": true, "owner_fields": ["phone"]},
+    {"tld": "org", "price_per_year": 18.00, "orderable": true, "owner_fields": ["phone"]},
+    {"tld": "info", "price_per_year": 27.50, "orderable": true, "owner_fields": ["phone"]},
+    {"tld": "de", "price_per_year": 10.00, "orderable": true, "owner_fields": ["phone"]},
+    {"tld": "eu", "price_per_year": 10.00, "orderable": true, "owner_fields": ["phone"], "note": "Inhaber mit Wohnsitz oder Sitz in der EU, in Island, Liechtenstein oder Norwegen"},
+    {"tld": "io", "price_per_year": 70.00, "orderable": true, "owner_fields": ["phone"]},
+    {"tld": "app", "price_per_year": 22.00, "orderable": true, "owner_fields": ["phone"], "note": "nur mit HTTPS erreichbar"},
+    {"tld": "swiss", "price_per_year": 120.00, "orderable": false, "note": "auf Anfrage; nur fuer Unternehmen mit Sitz in der Schweiz"}
+  ]
+}

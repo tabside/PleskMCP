@@ -1,0 +1,4 @@
+<!-- sitemap.xml: diese url-Einträge ergänzen -->
+<url><loc>https://www.example.com/ki-hosting/</loc><changefreq>monthly</changefreq><priority>0.8</priority></url>
+<url><loc>https://www.example.com/ki-hosting/bestellen/</loc><changefreq>monthly</changefreq><priority>0.6</priority></url>
+<url><loc>https://www.example.com/domains/</loc><changefreq>monthly</changefreq><priority>0.5</priority></url>

@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AI Hosting bestellen</title>
+<meta name="description" content="AI Hosting bestellen: 5 GB Webhosting mit KI-Zugang, CHF 60.00 pro Jahr, eigene oder neue Domain.">
+<meta name="robots" content="noindex, follow">
+<link rel="canonical" href="https://www.example.com/ki-hosting/bestellen/">
+<link rel="stylesheet" href="/assets/signup.css">
+</head>
+<body>
+<main class="aih">
+  <h1>AI Hosting bestellen</h1>
+  <p class="lead">Nach der Bestellung erhältst du die Rechnung per E-Mail. Sobald die Zahlung eingegangen ist, wird dein Hosting automatisch freigeschaltet.</p>
+  <div class="error-box" id="aih-error" hidden></div>
+
+  <form id="aih-order" method="post" action="https://mcp.example.com/plesk/signup" novalidate>
+    <input type="hidden" name="token" value="">
+    <!-- Honeypot: bleibt leer -->
+    <div class="hp" aria-hidden="true"><label for="website">Website</label><input type="text" id="website" name="website" tabindex="-1" autocomplete="off"></div>
+
+    <fieldset>
+      <legend>Domain</legend>
+      <div class="choice">
+        <label><input type="radio" name="domain_mode" value="own" checked> Ich habe bereits eine Domain</label>
+        <label><input type="radio" name="domain_mode" value="new" id="aih-mode-new"> Neue Domain registrieren</label>
+      </div>
+      <label for="domain">Domainname</label>
+      <input type="text" id="domain" name="domain" required autocapitalize="none" autocorrect="off" spellcheck="false" placeholder="meine-firma.ch">
+      <div class="error" data-error-for="domain"></div>
+      <div class="availability" id="aih-availability"></div>
+      <p class="hint" id="aih-own-hint">Deine Domain bleibt bei deinem bisherigen Anbieter. Nach der Freischaltung stellst du dort Nameserver oder A-Record auf das neue Hosting um; die Angaben stehen in der Willkommensmail.</p>
+      <p class="hint" id="aih-new-hint">Online bestellbare Endungen: <span id="aih-tld-list">werden geladen ...</span>. Andere Endungen auf Anfrage.</p>
+      <div class="error" data-error-for="domain_mode"></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Rechnungsadresse</legend>
+      <label for="company">Firma (optional)</label>
+      <input type="text" id="company" name="company" maxlength="100" autocomplete="organization">
+      <div class="error" data-error-for="company"></div>
+      <div class="grid">
+        <div><label for="first_name">Vorname</label><input type="text" id="first_name" name="first_name" required maxlength="60" autocomplete="given-name"><div class="error" data-error-for="first_name"></div></div>
+        <div><label for="last_name">Name</label><input type="text" id="last_name" name="last_name" required maxlength="60" autocomplete="family-name"><div class="error" data-error-for="last_name"></div></div>
+      </div>
+      <label for="street">Strasse und Nr.</label>
+      <input type="text" id="street" name="street" required maxlength="120" autocomplete="street-address">
+      <div class="error" data-error-for="street"></div>
+      <div class="grid">
+        <div><label for="zip">PLZ</label><input type="text" id="zip" name="zip" required maxlength="16" autocomplete="postal-code"><div class="error" data-error-for="zip"></div></div>
+        <div><label for="city">Ort</label><input type="text" id="city" name="city" required maxlength="60" autocomplete="address-level2"><div class="error" data-error-for="city"></div></div>
+      </div>
+      <label for="country">Land</label>
+      <select id="country" name="country" required autocomplete="country"><option value="CH">Schweiz</option></select>
+      <div class="error" data-error-for="country"></div>
+      <label for="email">E-Mail (Rechnung und Zugangsdaten)</label>
+      <input type="email" id="email" name="email" required maxlength="254" autocomplete="email">
+      <div class="error" data-error-for="email"></div>
+      <label for="phone" id="aih-phone-label">Telefon (optional)</label>
+      <input type="tel" id="phone" name="phone" maxlength="32" autocomplete="tel" placeholder="+41 44 123 45 67">
+      <div class="error" data-error-for="phone"></div>
+    </fieldset>
+
+    <div class="summary">
+      <table><tbody id="aih-summary-rows"><tr><td>Preise werden geladen ...</td><td></td></tr></tbody></table>
+    </div>
+
+    <p><label class="check"><input type="checkbox" name="terms" value="1" required> Ich akzeptiere die <a id="aih-terms-link" href="/agb/" target="_blank" rel="noopener">AGB</a> (Version <span id="aih-terms-version">...</span>).</label></p>
+    <div class="error" data-error-for="terms"></div>
+
+    <p><button type="submit">Kostenpflichtig bestellen</button></p>
+    <p class="hint">Es entsteht ein Jahresabo, das sich automatisch verlängert und bis zum Ende der laufenden Periode kündbar ist. Die Rechnung kommt per E-Mail und lässt sich mit QR-Rechnung oder Kreditkarte bezahlen. Die Freischaltung erfolgt automatisch nach dem Zahlungseingang.</p>
+  </form>
+</main>
+<script src="/assets/signup.js"></script>
+</body>
+</html>

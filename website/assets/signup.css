@@ -1,0 +1,35 @@
+/* AI Hosting: Produktseite und Bestellformular */
+.aih { max-width: 860px; margin: 0 auto; padding: 24px 16px; line-height: 1.5; }
+.aih h1 { font-size: 2rem; margin: 0 0 .5rem; }
+.aih .lead { font-size: 1.15rem; color: #444; }
+.aih .price { font-size: 1.6rem; font-weight: 700; margin: 1rem 0 .25rem; }
+.aih .price small { font-size: .9rem; font-weight: 400; color: #666; }
+.aih ul.features { padding-left: 1.2rem; }
+.aih .cta { display: inline-block; padding: .8rem 1.4rem; border-radius: 8px; background: #2563eb; color: #fff; text-decoration: none; font-weight: 600; }
+.aih .cta.secondary { background: transparent; color: #2563eb; border: 1px solid #2563eb; }
+.aih fieldset { border: 1px solid #ddd; border-radius: 8px; padding: 1rem 1.2rem; margin: 1.2rem 0; }
+.aih legend { font-weight: 600; padding: 0 .4rem; }
+.aih label { display: block; margin: .8rem 0 .25rem; font-size: .95rem; }
+.aih input[type=text], .aih input[type=email], .aih input[type=tel], .aih select { width: 100%; box-sizing: border-box; padding: .6rem .7rem; border: 1px solid #c8ccd2; border-radius: 6px; font-size: 1rem; }
+.aih .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 1rem; }
+@media (max-width: 600px) { .aih .grid { grid-template-columns: 1fr; } }
+.aih .choice label { display: flex; gap: .5rem; align-items: center; margin: .4rem 0; }
+.aih .choice input { width: auto; }
+.aih .hint { font-size: .9rem; color: #666; }
+.aih .error { color: #b91c1c; font-size: .9rem; margin-top: .25rem; }
+.aih .error-box { background: #fde8e8; color: #9b1c1c; padding: .8rem 1rem; border-radius: 6px; margin: 1rem 0; }
+.aih .ok-box { background: #e8f5e9; color: #1b5e20; padding: .8rem 1rem; border-radius: 6px; margin: 1rem 0; }
+.aih .summary { background: #f4f5f7; border-radius: 8px; padding: 1rem 1.2rem; }
+.aih .summary table { width: 100%; border-collapse: collapse; }
+.aih .summary td { padding: .3rem 0; }
+.aih .summary td:last-child { text-align: right; white-space: nowrap; }
+.aih .summary tr.total td { font-weight: 700; border-top: 1px solid #ccc; padding-top: .5rem; }
+.aih .hp { position: absolute; left: -9999px; top: -9999px; }
+.aih button[type=submit] { padding: .9rem 1.6rem; font-size: 1.05rem; border-radius: 8px; border: 0; background: #2563eb; color: #fff; cursor: pointer; }
+.aih button[disabled] { opacity: .6; cursor: wait; }
+.aih .availability { margin-top: .4rem; font-size: .95rem; }
+.aih .availability.free { color: #166534; }
+.aih .availability.taken { color: #b91c1c; }
+.domains-table { width: 100%; border-collapse: collapse; max-width: 640px; }
+.domains-table th, .domains-table td { text-align: left; padding: .5rem .6rem; border-bottom: 1px solid #e5e7eb; }
+.domains-table td:nth-child(2) { white-space: nowrap; }

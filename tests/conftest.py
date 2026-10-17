@@ -103,6 +103,12 @@ class FakePlesk:
         self.next_db_id = 500
         self.next_db_user_id = 700
         self.plan_names = dict(PLAN_NAMES)
+        self.aliases: set[str] = set()
+        self.created_customers: list[dict[str, Any]] = []  # signup: customer add calls (passwords are not kept)
+        self.created_webspaces: list[dict[str, Any]] = []
+        self.sessions: list[str] = []
+        self.next_customer_id = 900
+        self.next_webspace_id = 300
 
     # ---- helpers for tests
     def add_dns(self, site_id: int, rtype: str, host: str, value: str, opt: str = "") -> int:
@@ -276,6 +282,73 @@ class FakePlesk:
             parts.append(f"<subscriptions><subscription><locked>false</locked>{plans}</subscription></subscriptions>")
         return f"<result><status>ok</status><filter-id>{base + i}</filter-id><id>{base + i}</id><data>{''.join(parts)}</data></result>"
 
+    # ---- administration (signup service): customer add/set/del, webspace add/del/get-by-name
+    def _handle_customer_admin(self, root: ET.Element) -> httpx.Response:
+        op = list(root.find("./customer"))[0]
+        if op.tag == "get":
+            name = op.find("./filter/login").text
+            u = self.users.get(name)
+            if u is None or u.type != "customer":
+                return self._ok("<customer><get><result><status>error</status><errcode>1013</errcode><errtext>Customer does not exist.</errtext></result></get></customer>")
+            return self._ok(f"<customer><get><result><status>ok</status><filter-id>{name}</filter-id><id>{u.base}</id><data><gen_info><pname>{u.name}</pname><login>{name}</login><status>{u.status}</status></gen_info></data></result></get></customer>")
+        if op.tag == "add":
+            gen = op.find("gen_info")
+            name = gen.find("login").text
+            if name in self.users:
+                return self._ok("<customer><add><result><status>error</status><errcode>1007</errcode><errtext>Customer already exists.</errtext></result></add></customer>")
+            self.next_customer_id += 1
+            self.users[name] = FakeUser(password=gen.find("passwd").text, name=gen.find("pname").text, base=self.next_customer_id * 10)
+            self.created_customers.append({k: (gen.find(k).text if gen.find(k) is not None else None) for k in ("cname", "pname", "login", "email", "phone", "address", "city", "pcode", "country", "external-id")})
+            return self._ok(f"<customer><add><result><status>ok</status><id>{self.next_customer_id}</id></result></add></customer>")
+        if op.tag == "set":
+            name = op.find("./filter/login").text
+            u = self.users.get(name)
+            if u is None:
+                return self._ok("<customer><set><result><status>error</status><errcode>1013</errcode><errtext>Customer does not exist.</errtext></result></set></customer>")
+            u.status = int(op.find("./values/gen_info/status").text)
+            return self._ok(f"<customer><set><result><status>ok</status><filter-id>{name}</filter-id><id>{u.base}</id></result></set></customer>")
+        if op.tag == "del":
+            name = op.find("./filter/login").text
+            if name not in self.users:
+                return self._ok("<customer><del><result><status>error</status><errcode>1013</errcode><errtext>Customer does not exist.</errtext></result></del></customer>")
+            del self.users[name]
+            return self._ok(f"<customer><del><result><status>ok</status><filter-id>{name}</filter-id></result></del></customer>")
+        return self._system_error(1014, "unsupported customer op")
+
+    def _handle_webspace_admin(self, root: ET.Element) -> httpx.Response | None:
+        op = list(root.find("./webspace"))[0]
+        if op.tag == "get" and op.find("./filter/name") is not None:
+            name = op.find("./filter/name").text
+            for u in self.users.values():
+                for i, d in enumerate(u.domains):
+                    if d.get("kind", "webspace") == "webspace" and d["name"] == name:
+                        return self._ok(f"<webspace><get>{self._webspace_result(i, d, {'gen_info'}, u.base)}</get></webspace>")
+            return self._ok("<webspace><get><result><status>error</status><errcode>1013</errcode><errtext>Webspace does not exist.</errtext></result></get></webspace>")
+        if op.tag == "add":
+            gen = op.find("gen_setup")
+            name = gen.find("name").text
+            owner = gen.find("owner-login").text
+            u = self.users.get(owner)
+            if u is None:
+                return self._ok("<webspace><add><result><status>error</status><errcode>1013</errcode><errtext>Owner does not exist.</errtext></result></add></webspace>")
+            if any(d["name"] == name for x in self.users.values() for d in x.domains):
+                return self._ok("<webspace><add><result><status>error</status><errcode>1007</errcode><errtext>Domain already exists.</errtext></result></add></webspace>")
+            props = {p.find("name").text: p.find("value").text for p in op.iterfind("./hosting/vrt_hst/property")}
+            plan = op.find("plan-name").text if op.find("plan-name") is not None else None
+            u.domains.append({"name": name, "sysuser": props.get("ftp_login", ""), "docroot": f"/var/www/vhosts/{name}/httpdocs", "plan_guids": ["guid-plan-ai"], "quota": 5 * GB})
+            self.next_webspace_id += 1
+            self.created_webspaces.append({"name": name, "owner": owner, "plan": plan, "ftp_login": props.get("ftp_login"), "ip": gen.find("ip_address").text, "id": self.next_webspace_id})
+            return self._ok(f"<webspace><add><result><status>ok</status><id>{self.next_webspace_id}</id></result></add></webspace>")
+        if op.tag == "del":
+            name = op.find("./filter/name").text
+            for u in self.users.values():
+                for d in list(u.domains):
+                    if d["name"] == name:
+                        u.domains.remove(d)
+                        return self._ok(f"<webspace><del><result><status>ok</status><filter-id>{name}</filter-id></result></del></webspace>")
+            return self._ok("<webspace><del><result><status>error</status><errcode>1013</errcode><errtext>Webspace does not exist.</errtext></result></del></webspace>")
+        return None
+
     def _handle(self, request: httpx.Request) -> httpx.Response:
         login = request.headers.get("HTTP_AUTH_LOGIN")
         password = request.headers.get("HTTP_AUTH_PASSWD")
@@ -296,6 +369,8 @@ class FakePlesk:
         self.calls.append((login, operator))
         if user.type == "smbuser":
             return self._ok(f"<{operator}><get><result><status>error</status><errcode>1006</errcode><errtext>Permission denied.</errtext></result></get></{operator}>")
+        if operator == "customer" and user.type == "admin":
+            return self._handle_customer_admin(root)
         if operator == "customer":
             filt = root.find("./customer/get/filter/login")
             wanted = filt.text if filt is not None else login
@@ -305,6 +380,31 @@ class FakePlesk:
                 f"<customer><get><result><status>ok</status><filter-id>{login}</filter-id><id>96</id><data><gen_info>"
                 f"<pname>{user.name}</pname><login>{login}</login><status>{user.status}</status></gen_info></data></result></get></customer>"
             )
+        if operator == "server" and root.find("./server/create_session") is not None:
+            if user.type != "admin":
+                return self._ok("<server><create_session><result><status>error</status><errcode>1006</errcode><errtext>Permission denied.</errtext></result></create_session></server>")
+            target = root.find("./server/create_session/login").text
+            if target not in self.users:
+                return self._ok("<server><create_session><result><status>error</status><errcode>1013</errcode><errtext>User does not exist.</errtext></result></create_session></server>")
+            token = "sess-" + secrets.token_hex(6)
+            self.sessions.append(token)
+            return self._ok(f"<server><create_session><result><status>ok</status><id>{token}</id></result></create_session></server>")
+        if operator == "site-alias":
+            name = root.find("./site-alias/get/filter/name").text
+            if name in self.aliases:
+                return self._ok(f"<site-alias><get><result><status>ok</status><id>1</id><info><name>{name}</name></info></result></get></site-alias>")
+            return self._ok("<site-alias><get><result><status>error</status><errcode>1013</errcode><errtext>Site alias does not exist.</errtext></result></get></site-alias>")
+        if operator == "webspace" and user.type == "admin":
+            handled = self._handle_webspace_admin(root)
+            if handled is not None:
+                return handled
+        if operator == "site" and user.type == "admin" and root.find("./site/get/filter/name") is not None:
+            name = root.find("./site/get/filter/name").text
+            for u in self.users.values():
+                for i, d in enumerate(u.domains):
+                    if d.get("kind") == "site" and d["name"] == name:
+                        return self._ok(f"<site><get><result><status>ok</status><filter-id>{name}</filter-id><id>{u.base + 100 + i}</id><data><gen_info><name>{name}</name></gen_info></data></result></get></site>")
+            return self._ok("<site><get><result><status>error</status><errcode>1013</errcode><errtext>Site does not exist.</errtext></result></get></site>")
         if operator == "webspace":
             get = root.find("./webspace/get")
             dataset_el = get.find("dataset")
