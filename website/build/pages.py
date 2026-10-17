@@ -56,7 +56,7 @@ FORM_CSS = """<style>
 
 ORDER_BODY = """<section class="hero" style="padding:110px 0 24px"><div class="wrap"><div class="inner" style="max-width:760px">
 <h1 style="font-weight:200">AI Hosting bestellen</h1>
-<p class="lead">Nach der Bestellung erhalten Sie die Rechnung per E-Mail (QR-Rechnung oder Kreditkarte). Sobald die Zahlung eingegangen ist, wird Ihr Hosting automatisch freigeschaltet und Sie erhalten die Zugangsdaten und die Anleitung für den KI-Zugang.</p>
+<p class="lead">Nach der Bestellung bestätigen Sie Ihre E-Mail-Adresse per Link, dann erhalten Sie die Rechnung per E-Mail (QR-Rechnung oder Kreditkarte). Sobald die Zahlung eingegangen ist, wird Ihr Hosting automatisch freigeschaltet und Sie erhalten die Zugangsdaten und die Anleitung für den KI-Zugang.</p>
 </div></div></section>
 <section style="padding-top:24px"><div class="wrap order">
 <div class="error-box" id="aih-error" hidden></div>
@@ -108,13 +108,21 @@ ORDER_BODY = """<section class="hero" style="padding:110px 0 24px"><div class="w
 """
 
 THANKS_BODY = """<section class="hero center"><div class="wrap"><div class="inner">
-<h1 style="font-weight:200">Vielen Dank für Ihre Bestellung.</h1>
-<p class="lead">Ihre Bestellung ist eingegangen<span id="aih-order-no"></span>. Die Rechnung kommt in den nächsten Minuten per E-Mail; Sie können per QR-Rechnung oder Kreditkarte bezahlen.</p>
+<div id="aih-step-confirm">
+<h1 style="font-weight:200">Bitte bestätigen Sie Ihre E-Mail-Adresse.</h1>
+<p class="lead">Ihre Bestellung ist eingegangen<span class="aih-order-no"></span>. Wir haben Ihnen eine E-Mail mit einem Bestätigungslink geschickt. Bitte klicken Sie auf den Link; erst danach stellen wir die Rechnung aus.</p>
+<p style="font-size:.9rem;color:var(--muted)">Keine E-Mail erhalten? Bitte den Spam-Ordner prüfen. Der Link ist 48 Stunden gültig; danach verfällt die Bestellung ohne Kosten.</p>
+</div>
+<div id="aih-step-confirmed" hidden>
+<h1 style="font-weight:200">Vielen Dank, Ihre Bestellung ist bestätigt.</h1>
+<p class="lead">Die Rechnung<span class="aih-order-no"></span> kommt in den nächsten Minuten per E-Mail; Sie können per QR-Rechnung oder Kreditkarte bezahlen.</p>
 <p class="lead">Sobald die Zahlung eingegangen ist, wird Ihr Hosting automatisch freigeschaltet. Sie erhalten dann eine E-Mail mit dem Link zum Setzen Ihres Passworts, den Angaben zur Domain und der Anleitung für den KI-Zugang.</p>
 <p style="font-size:.9rem;color:var(--muted)">Keine Rechnung erhalten? Bitte auch den Spam-Ordner prüfen oder uns über das <a href="/kontakt/">Kontaktformular</a> schreiben.</p>
+</div>
 <div class="actions btn-row" style="justify-content:center"><a class="btn" href="/">Zur Startseite</a><a class="btn ghost" href="/ki-hosting/">Zum AI Hosting</a></div>
 </div></div></section>
-<script>(function(){var m=/[?&]order=([a-f0-9]{16})/.exec(location.search);if(m)document.getElementById("aih-order-no").textContent=" (Bestell-Nr. "+m[1]+")"})();</script>
+<script>(function(){var q=location.search;var m=/[?&]order=([a-f0-9]{16})/.exec(q);if(m){[].forEach.call(document.querySelectorAll(".aih-order-no"),function(e){e.textContent=" (Bestell-Nr. "+m[1]+")"})}
+if(/[?&]step=confirmed/.test(q)){document.getElementById("aih-step-confirm").hidden=true;document.getElementById("aih-step-confirmed").hidden=false}})();</script>
 """
 
 
@@ -152,7 +160,7 @@ def main(out: str) -> None:
             path="/ki-hosting/bestellen/", body=ORDER_BODY.replace("__SIGNUP_BASE__", SIGNUP_BASE), robots="noindex, follow", head_extra=FORM_CSS, current=True,
         ),
         "ki-hosting/danke/index.html": page(
-            title="Bestellung eingegangen", description="Ihre Bestellung für AI Hosting ist eingegangen.", path="/ki-hosting/danke/", body=THANKS_BODY, robots="noindex, nofollow", current=True,
+            title="Bestellung eingegangen", description="Ihre Bestellung für AI Hosting ist eingegangen: E-Mail bestätigen, dann kommt die Rechnung.", path="/ki-hosting/danke/", body=THANKS_BODY, robots="noindex, nofollow", current=True,
         ),
         "domains/index.html": page(
             title="Domains", description="Domainpreise der tabside GmbH: .ch, .com, .swiss und weitere Endungen.", path="/domains/", body=domains_body(price_list),

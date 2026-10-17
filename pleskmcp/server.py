@@ -285,6 +285,10 @@ def build_app(services: Services) -> Starlette:
         async def signup_thanks(request: Request) -> Response:
             return await signup.thanks(request)
 
+        @mcp.custom_route("/signup/confirm/{token}", methods=["GET"])
+        async def signup_confirm(request: Request) -> Response:
+            return await signup.confirm(request)
+
         @mcp.custom_route("/signup/welcome/{token}", methods=["GET"])
         async def signup_welcome(request: Request) -> Response:
             return await signup.welcome(request)

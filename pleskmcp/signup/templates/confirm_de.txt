@@ -1,0 +1,13 @@
+Guten Tag {name}
+
+Vielen Dank für Ihre Bestellung von {product} für {domain} (Bestell-Nr. {order_id}).
+
+Bitte bestätigen Sie Ihre E-Mail-Adresse mit diesem Link:
+{confirm_link}
+
+Erst nach der Bestätigung stellen wir die Rechnung aus und schicken sie an diese Adresse (QR-Rechnung oder Kreditkarte). Sobald die Zahlung eingegangen ist, wird Ihr Hosting automatisch freigeschaltet.
+
+Der Link ist {ttl_hours} Stunden gültig. Haben Sie nichts bestellt, ignorieren Sie diese E-Mail; die Bestellung verfällt dann von selbst und es entstehen keine Kosten.
+
+Freundliche Grüsse
+{sender_name}

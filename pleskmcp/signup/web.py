@@ -5,7 +5,8 @@
     GET  /signup/check-domain      availability of a new domain at Netim (rate limited)
     POST /signup                   the order (form POST from the website or JSON); CSRF token, honeypot,
                                    minimum fill time, per-IP and per-e-mail limits, HTTPS only
-    GET  /signup/thanks/{id}       built-in confirmation page (when SIGNUP_SUCCESS_URL is empty)
+    GET  /signup/thanks/{id}       built-in page after the order (check your mail) and after the confirmation (invoice comes)
+    GET  /signup/confirm/{token}   link from the confirmation mail: creates subscription, invoice and ticket
     GET  /signup/welcome/{token}   one-time login link from the welcome mail
     GET  /signup/admin             overview of all orders (HTTP Basic, SIGNUP_ADMIN_USER/PASSWORD)
     POST /signup/admin/action      retry / check now / confirm deletion
@@ -34,11 +35,12 @@ from ..plesk_api import PleskError
 from .clients import ExternalError
 from .forms import COUNTRIES, domain_format_ok, honeypot_filled, normalize_domain, parse_order
 from .service import Busy, OrderRejected, SignupService
-from .store import ACTIVE, AWAITING_PAYMENT, NEEDS_ATTENTION, PENDING_DELETION, STATUSES, SUSPENDED
+from .store import ACTIVE, AWAITING_CONFIRMATION, AWAITING_PAYMENT, NEEDS_ATTENTION, PENDING_DELETION, STATUSES, SUSPENDED
 
 logger = logging.getLogger(__name__)
 
 STATUS_LABELS = {
+    AWAITING_CONFIRMATION: "wartet auf E-Mail-Bestätigung",
     AWAITING_PAYMENT: "wartet auf Zahlung",
     "activating": "wird freigeschaltet",
     ACTIVE: "aktiv",
@@ -46,17 +48,29 @@ STATUS_LABELS = {
     PENDING_DELETION: "Löschung freigeben",
     "deleted": "gelöscht",
     NEEDS_ATTENTION: "manuelle Prüfung",
+    "expired": "nicht bestätigt, verfallen",
 }
 
 _THANKS = """<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex"><title>Bestellung eingegangen</title><style>{style}</style></head>
+<meta name="robots" content="noindex"><title>{title}</title><style>{style}</style></head>
 <body><div class="card">
-  <h1>Vielen Dank für Ihre Bestellung</h1>
-  <p>Ihre Bestellung für <strong>{domain}</strong> ist eingegangen (Bestell-Nr. {order_id}).</p>
-  <p>Die Rechnung kommt in den nächsten Minuten per E-Mail an <strong>{email}</strong>. Sie können sie mit QR-Rechnung oder Kreditkarte bezahlen.</p>
-  <p>Sobald die Zahlung eingegangen ist, wird Ihr Hosting automatisch freigeschaltet. Sie erhalten dann eine E-Mail mit dem Link zum Setzen Ihres Passworts und der Anleitung für den KI-Zugang.</p>
-  <p class="muted">Keine Rechnung erhalten? Bitte auch den Spam-Ordner prüfen oder auf die Rechnungsmail antworten.</p>
+  <h1>{title}</h1>
+  {body}
 </div></body></html>"""
+
+_THANKS_CONFIRM = """<p>Ihre Bestellung für <strong>{domain}</strong> ist eingegangen (Bestell-Nr. {order_id}).</p>
+  <p>Wir haben eine E-Mail an <strong>{email}</strong> geschickt. Bitte klicken Sie auf den Link darin, um Ihre Adresse zu bestätigen. Erst danach stellen wir die Rechnung aus.</p>
+  <p class="muted">Keine E-Mail erhalten? Bitte den Spam-Ordner prüfen. Der Link ist {ttl_hours} Stunden gültig.</p>"""
+
+_THANKS_CONFIRMED = """<p>Ihre E-Mail-Adresse ist bestätigt. Die Rechnung für <strong>{domain}</strong> (Bestell-Nr. {order_id}) kommt in den nächsten Minuten per E-Mail an <strong>{email}</strong>. Sie können sie mit QR-Rechnung oder Kreditkarte bezahlen.</p>
+  <p>Sobald die Zahlung eingegangen ist, wird Ihr Hosting automatisch freigeschaltet. Sie erhalten dann eine E-Mail mit dem Link zum Setzen Ihres Passworts und der Anleitung für den KI-Zugang.</p>
+  <p class="muted">Keine Rechnung erhalten? Bitte auch den Spam-Ordner prüfen oder auf die Rechnungsmail antworten.</p>"""
+
+_CONFIRM_FAILED = {
+    "invalid": ("Link ungültig", "Dieser Bestätigungslink ist unbekannt. Bitte den Link aus der E-Mail vollständig kopieren oder die Bestellung neu aufgeben."),
+    "expired": ("Link abgelaufen", "Dieser Bestätigungslink ist abgelaufen. Bitte geben Sie die Bestellung neu auf; es sind keine Kosten entstanden."),
+    "domain_taken": ("Domain nicht mehr verfügbar", "Die gewünschte Domain wurde in der Zwischenzeit anderweitig vergeben oder eingerichtet. Bitte geben Sie die Bestellung mit einer anderen Domain neu auf; es sind keine Kosten entstanden."),
+}
 
 _WELCOME_EXPIRED = """<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex"><title>Link abgelaufen</title><style>{style}</style></head>
@@ -256,21 +270,46 @@ class SignupPages:
         try:
             order, created = await self.service.submit(data, client_ip=ip)
         except OrderRejected as exc:
-            return reply(422, {"ok": False, "error": exc.code, "errors": {exc.field: exc.message}, "message": exc.message})
-        return reply(200, {"ok": True, "order_id": order.id, "created": created, "domain": order.domain, "redirect": self._thanks_url(order.id, order.domain)})
+            return reply(422 if exc.code != "mail_failed" else 503, {"ok": False, "error": exc.code, "errors": {exc.field: exc.message}, "message": exc.message})
+        step = "confirm" if order.status == AWAITING_CONFIRMATION else "confirmed"
+        return reply(200, {"ok": True, "order_id": order.id, "created": created, "domain": order.domain, "step": step, "redirect": self._thanks_url(order.id, order.domain, step=step)})
 
-    def _thanks_url(self, order_id: str, domain: str | None) -> str:
+    def _thanks_url(self, order_id: str, domain: str | None, *, step: str = "confirm") -> str:
+        """step=confirm: 'check your mail'; step=confirmed: 'invoice is on its way'."""
         if self.cfg.success_url:
             sep = "&" if "?" in self.cfg.success_url else "?"
-            return f"{self.cfg.success_url}{sep}order={order_id}"
-        return f"{self._settings.public_base_url}/signup/thanks/{order_id}"
+            return f"{self.cfg.success_url}{sep}order={order_id}&step={step}"
+        return f"{self._settings.public_base_url}/signup/thanks/{order_id}?step={step}"
 
     async def thanks(self, request: Request) -> Response:
         order_id = request.path_params.get("order_id", "")
         order = await self.service.store.get(order_id) if len(order_id) == 16 else None
-        if order is None:
-            return HTMLResponse(_THANKS.format(style=STYLE, domain="Ihre Domain", order_id=html.escape(order_id[:16]), email="Ihre E-Mail-Adresse"), headers={"Cache-Control": "no-store"})
-        return HTMLResponse(_THANKS.format(style=STYLE, domain=html.escape(order.domain), order_id=html.escape(order.id), email=html.escape(order.email)), headers={"Cache-Control": "no-store"})
+        confirmed = request.query_params.get("step") == "confirmed" and order is not None and order.status != AWAITING_CONFIRMATION
+        values = {
+            "domain": html.escape(order.domain) if order else "Ihre Domain",
+            "order_id": html.escape(order.id) if order else html.escape(order_id[:16]),
+            "email": html.escape(order.email) if order else "Ihre E-Mail-Adresse",
+            "ttl_hours": self.cfg.confirm_ttl_hours,
+        }
+        if confirmed:
+            page = _THANKS.format(style=STYLE, title="Vielen Dank, Ihre Bestellung ist bestätigt", body=_THANKS_CONFIRMED.format(**values))
+        else:
+            page = _THANKS.format(style=STYLE, title="Bitte E-Mail-Adresse bestätigen", body=_THANKS_CONFIRM.format(**values))
+        return HTMLResponse(page, headers={"Cache-Control": "no-store"})
+
+    async def confirm(self, request: Request) -> Response:
+        token = request.path_params.get("token", "")
+        ip = client_ip(request)
+        if await self._limited(f"confirm:{ip}", 20, 600):
+            return simple_page("Zu viele Versuche", "Bitte später erneut versuchen.", status=429)
+        if not token or len(token) > 100:
+            title, text = _CONFIRM_FAILED["invalid"]
+            return simple_page(title, text, status=404)
+        outcome, order = await self.service.confirm(token)
+        if outcome in ("confirmed", "already") and order is not None:
+            return RedirectResponse(self._thanks_url(order.id, order.domain, step="confirmed"), status_code=303, headers={"Cache-Control": "no-store"})
+        title, text = _CONFIRM_FAILED.get(outcome, _CONFIRM_FAILED["invalid"])
+        return simple_page(title, text, status=410 if outcome != "invalid" else 404)
 
     async def welcome(self, request: Request) -> Response:
         token = request.path_params.get("token", "")

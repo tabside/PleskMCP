@@ -19,6 +19,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from ..db import Base
 
+AWAITING_CONFIRMATION = "awaiting_confirmation"
 AWAITING_PAYMENT = "awaiting_payment"
 ACTIVATING = "activating"
 ACTIVE = "active"
@@ -26,7 +27,9 @@ SUSPENDED = "suspended"
 PENDING_DELETION = "pending_deletion"
 DELETED = "deleted"
 NEEDS_ATTENTION = "needs_attention"
-STATUSES = (AWAITING_PAYMENT, ACTIVATING, ACTIVE, SUSPENDED, PENDING_DELETION, DELETED, NEEDS_ATTENTION)
+EXPIRED = "expired"  # e-mail never confirmed
+STATUSES = (AWAITING_CONFIRMATION, AWAITING_PAYMENT, ACTIVATING, ACTIVE, SUSPENDED, PENDING_DELETION, DELETED, NEEDS_ATTENTION, EXPIRED)
+# statuses that reserve the domain (an unconfirmed order does not, so a fake order cannot block a domain)
 OPEN_STATUSES = (AWAITING_PAYMENT, ACTIVATING, ACTIVE, SUSPENDED, PENDING_DELETION, NEEDS_ATTENTION)
 
 
@@ -102,6 +105,9 @@ class SignupOrder(Base):
     backup_done_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     backup_result: Mapped[str | None] = mapped_column(String(128), nullable=True)
     deleted_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confirm_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    confirm_expires: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    confirmed_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
     welcome_token_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     welcome_token_expires: Mapped[int | None] = mapped_column(Integer, nullable=True)
     welcome_sent_at: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -192,11 +198,40 @@ class SignupStore:
             row = (
                 await session.execute(
                     select(SignupOrder)
-                    .where(func.lower(SignupOrder.email) == email.lower(), func.lower(SignupOrder.domain) == domain.lower(), SignupOrder.status == AWAITING_PAYMENT)
+                    .where(func.lower(SignupOrder.email) == email.lower(), func.lower(SignupOrder.domain) == domain.lower(), SignupOrder.status.in_((AWAITING_CONFIRMATION, AWAITING_PAYMENT)))
                     .limit(1)
                 )
             ).scalar_one_or_none()
         return Order(row.as_dict()) if row else None
+
+    async def find_by_confirm_token(self, token_hash: str) -> Order | None:
+        async with self._sessions() as session:
+            row = (await session.execute(select(SignupOrder).where(SignupOrder.confirm_token_hash == token_hash).limit(1))).scalar_one_or_none()
+        return Order(row.as_dict()) if row else None
+
+    async def confirm(self, order_id: str, token_hash: str) -> bool:
+        """awaiting_confirmation -> awaiting_payment, exactly once per token."""
+        now = int(time.time())
+        async with self._sessions() as session:
+            result = await session.execute(
+                update(SignupOrder)
+                .where(SignupOrder.id == order_id, SignupOrder.confirm_token_hash == token_hash, SignupOrder.status == AWAITING_CONFIRMATION)
+                .values(status=AWAITING_PAYMENT, confirm_token_hash=None, confirmed_at=now, updated_at=now)
+            )
+            await session.commit()
+            return result.rowcount == 1
+
+    async def expire_unconfirmed(self, older_than: int) -> list[str]:
+        """Orders still awaiting confirmation whose link expired; returns their ids after marking them expired."""
+        now = int(time.time())
+        async with self._sessions() as session:
+            rows = (
+                await session.execute(select(SignupOrder.id).where(SignupOrder.status == AWAITING_CONFIRMATION, SignupOrder.confirm_expires < older_than))
+            ).scalars().all()
+            if rows:
+                await session.execute(update(SignupOrder).where(SignupOrder.id.in_(list(rows))).values(status=EXPIRED, confirm_token_hash=None, updated_at=now))
+                await session.commit()
+        return list(rows)
 
     async def find_by_welcome_token(self, token_hash: str) -> Order | None:
         async with self._sessions() as session:
