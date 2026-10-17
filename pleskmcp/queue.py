@@ -325,8 +325,23 @@ class Worker:
         await self._redis.set(f"worker:{self.worker_id}", str(int(time.time())), ex=30)
         touch_heartbeat_file()
 
+    async def preflight(self) -> bool:
+        """Check the SSH configuration once at start; the result is visible in /readyz (ssh_preflight)."""
+        check = getattr(self._pool, "preflight", None)
+        ok, message = (True, "no preflight") if check is None else await check()
+        if ok:
+            logger.info("worker %s: ssh preflight ok: %s", self.worker_id, message)
+        else:
+            logger.error("worker %s: ssh preflight FAILED, every job will fail until this is fixed: %s", self.worker_id, message)
+        await self._redis.set(f"preflight:{self.worker_id}", json.dumps({"ok": ok, "message": message, "ts": int(time.time())}), ex=3600)
+        return ok
+
     async def run_forever(self) -> None:
         logger.info("worker %s started (max %d parallel helper runs)", self.worker_id, self._settings.ssh_max_concurrency)
+        try:
+            await self.preflight()
+        except Exception as exc:  # noqa: BLE001 - never block the loop on the self-check
+            logger.error("worker %s: preflight could not run: %s", self.worker_id, exc)
         last_beat = 0.0
         while not self._stopping.is_set():
             if time.time() - last_beat > 10:
@@ -354,7 +369,7 @@ class Worker:
         if self._tasks:
             logger.info("worker %s: waiting for %d running jobs", self.worker_id, len(self._tasks))
             await asyncio.wait(self._tasks, timeout=self._settings.job_time_limit + 10)
-        await self._redis.delete(f"worker:{self.worker_id}")
+        await self._redis.delete(f"worker:{self.worker_id}", f"preflight:{self.worker_id}")
         await self._pool.close()
         logger.info("worker %s stopped", self.worker_id)
 
@@ -389,16 +404,20 @@ class Worker:
                 await self._queue.record_metric(op, False, time.time() - started)
                 return
             except RemoteError as exc:
-                logger.error("job %s (%s/%s): remote error: %s", job_id, login, op, exc)
-                await self._queue.finish(job_id, login, status="failed", result=None, error={"code": "remote_unavailable", "message": "helper not reachable"})
+                # the message may name hosts or files: it goes to the log, only the code to the client
+                logger.error("job %s (%s/%s): remote error [%s]: %s", job_id, login, op, exc.code, exc)
+                await self._queue.finish(job_id, login, status="failed", result=None, error={"code": exc.code, "message": "helper not reachable"})
                 await self._queue.record_metric(op, False, time.time() - started)
                 return
             await self._queue.finish(job_id, login, status="done", result=result, error=None)
             await self._queue.record_metric(op, True, time.time() - started)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("job %s crashed: %s", job_id, exc)
+            logger.exception("job %s (%s/%s) crashed: %s", job_id, login, op, exc)
             try:
-                await self._queue.finish(job_id, login, status="failed", result=None, error={"code": "internal", "message": "job failed"})
+                await self._queue.finish(
+                    job_id, login, status="failed", result=None, error={"code": "internal", "message": "job failed", "details": {"error": exc.__class__.__name__}}
+                )
+                await self._queue.record_metric(op, False, time.time() - started)
             except Exception:  # noqa: BLE001
                 pass
         finally:

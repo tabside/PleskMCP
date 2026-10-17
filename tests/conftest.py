@@ -563,6 +563,9 @@ class FakePool:
             self.busy -= 1
         return json.loads(json.dumps(result))
 
+    async def preflight(self) -> tuple[bool, str]:
+        return True, "fake pool"
+
     async def close(self) -> None:
         return None
 

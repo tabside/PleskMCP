@@ -18,6 +18,7 @@ the worker service (queue.py).
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -156,10 +157,22 @@ async def readiness(services: Services) -> tuple[bool, dict[str, Any]]:
         checks["redis"] = False
         checks["redis_error"] = exc.__class__.__name__
     workers = 0
+    preflight: dict[str, Any] = {}
     if checks.get("redis"):
         async for _ in services.redis.scan_iter(match="worker:*", count=100):
             workers += 1
+        async for key in services.redis.scan_iter(match="preflight:*", count=100):
+            raw = await services.redis.get(key)
+            try:
+                preflight[key.split(":", 1)[1]] = json.loads(raw) if raw else None
+            except ValueError:
+                preflight[key.split(":", 1)[1]] = None
     checks["workers"] = workers
+    # SSH self-check of every worker (key file and host key); failures explain "ssh_config" errors
+    checks["ssh_preflight"] = "ok" if preflight and all(p and p.get("ok") for p in preflight.values()) else ("failed" if preflight else "unknown")
+    failed = [p.get("message") for p in preflight.values() if p and not p.get("ok")]
+    if failed:
+        checks["ssh_preflight_errors"] = sorted(set(failed))
     ok = bool(checks.get("database")) and bool(checks.get("redis"))
     return ok, checks
 

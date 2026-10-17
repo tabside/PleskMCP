@@ -196,11 +196,25 @@ class ToolRunner:
     def explain_error(error: dict[str, Any]) -> str:
         code = str(error.get("code", "error"))
         message = str(error.get("message", ""))
-        if code == "remote_unavailable":
-            return "Der Dateidienst auf dem Server ist derzeit nicht erreichbar."
-        if code == "timeout":
-            return f"Zeitlimit überschritten: {message}"
         details = error.get("details") or {}
+        operator = "Der Hoster muss das beheben; der Fehler steht im Worker-Log."
+        if code in ("remote_unavailable", "ssh_unreachable"):
+            return f"Der Dateidienst auf dem Server ist derzeit nicht erreichbar. Bitte später erneut versuchen. [{code}]"
+        if code == "ssh_config":
+            return f"Der Dateidienst ist nicht korrekt eingerichtet (SSH-Schlüssel oder Host-Key des Servers nicht verwendbar). {operator} [{code}]"
+        if code == "ssh_auth":
+            return f"Der Server hat die Anmeldung des Dateidienstes abgelehnt (SSH-Schlüssel nicht hinterlegt). {operator} [{code}]"
+        if code == "sudo_refused":
+            return f"Dem Dateidienst fehlt auf dem Server die Berechtigung, als Systembenutzer des Abos zu arbeiten (sudoers). {operator} [{code}]"
+        if code == "helper_crash":
+            return f"Das Hilfsprogramm auf dem Server hat keine gültige Antwort geliefert (veraltete Version oder Absturz; install.sh erneut ausführen). {operator} [{code}]"
+        if code in ("timeout", "helper_timeout"):
+            return f"Zeitlimit überschritten: {message or 'der Auftrag auf dem Server hat zu lange gedauert'} [{code}]"
+        if code == "worker_lost":
+            return f"Der Auftrag wurde unterbrochen und mehrfach wiederholt, ohne Ergebnis. Bitte erneut versuchen. [{code}]"
+        if code == "internal":
+            kind = details.get("error")
+            return f"Interner Fehler im Dateidienst{f' ({kind})' if kind else ''}. {operator} [{code}]"
         if code == "quota_exceeded":
             usage = details.get("usage_bytes")
             limit = details.get("limit_bytes")
