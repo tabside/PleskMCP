@@ -10,7 +10,7 @@ from ..audit import AuditLog
 from ..config import Settings
 from ..db import Store
 from ..plesk_api import PleskClient
-from .clients import BexioClient, Mailer, NetimClient, PleskRestClient, RebillClient, ZammadClient
+from .clients import Mailer, NetimClient, PleskRestClient, RebillClient, ZammadClient
 from .pricelist import load_price_list
 from .service import SignupService
 from .store import SignupStore
@@ -19,7 +19,6 @@ from .store import SignupStore
 class _Closing(SignupService):
     async def aclose(self) -> None:
         await self.rebill.aclose()
-        await self.bexio.aclose()
         await self.zammad.aclose()
         await self.plesk_rest.aclose()
 
@@ -40,7 +39,6 @@ def build_signup(settings: Settings, store: Store, redis: Redis, plesk: PleskCli
         audit,
         price_list,
         rebill=RebillClient(cfg.rebill_api_url, cfg.rebill_api_token, transport=transports.get("rebill")),
-        bexio=BexioClient(cfg.bexio_api_url, cfg.bexio_api_token, transport=transports.get("bexio")),
         netim=netim,
         zammad=ZammadClient(cfg.zammad_url, cfg.zammad_token, cfg.zammad_group, transport=transports.get("zammad")),
         plesk_rest=PleskRestClient(settings.plesk_url, cfg.plesk_api_key, verify_ssl=settings.plesk_verify_ssl, timeout=cfg.backup_timeout, transport=transports.get("plesk_rest")),

@@ -1,4 +1,4 @@
-"""HTTP clients of the signup service: reBill, bexio, Netim, Zammad, SMTP.
+"""HTTP clients of the signup service: reBill (which talks to bexio), Netim, Plesk REST, Zammad, SMTP.
 
 Every client takes an optional httpx transport so tests run against fakes. Errors
 are raised as ExternalError with a short code; messages never include customer
@@ -105,86 +105,17 @@ class RebillClient(_Http):
         data = await self._request("GET", f"/subscriptions/{external_ref}")
         return (data or {}).get("subscription") or {}
 
+    async def sync_payments(self, external_ref: str) -> dict[str, Any]:
+        """POST /subscriptions/{ref}/sync-payments: reBill refreshes the invoice states from bexio and returns the subscription."""
+        data = await self._request("POST", f"/subscriptions/{external_ref}/sync-payments", json_body={})
+        return (data or {}).get("subscription") or {}
+
     @staticmethod
     def newest_invoice(subscription: dict[str, Any]) -> dict[str, Any] | None:
         invoices = [i for i in subscription.get("invoices") or [] if i.get("bexio_invoice_id")]
         if not invoices:
             return None
         return sorted(invoices, key=lambda i: (str(i.get("created_at") or ""), int(i["bexio_invoice_id"])))[-1]
-
-
-# ------------------------------------------------------------------------ bexio
-class BexioClient(_Http):
-    """bexio REST API 2.0 with a static API token (read contacts, read invoice status, create a contact)."""
-
-    service = "bexio"
-
-    def __init__(self, base_url: str, token: str, *, transport: httpx.AsyncBaseTransport | None = None):
-        super().__init__(base_url, transport=transport, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
-        self._countries: dict[str, int] | None = None
-
-    async def find_contacts_by_email(self, email: str) -> list[dict[str, Any]]:
-        found: dict[int, dict[str, Any]] = {}
-        for field in ("mail", "mail_second"):
-            rows = await self._request("POST", "/2.0/contact/search", json_body=[{"field": field, "value": email, "criteria": "="}])
-            for row in rows or []:
-                if isinstance(row, dict) and row.get("id"):
-                    found[int(row["id"])] = row
-        return list(found.values())
-
-    async def country_id(self, iso2: str) -> int | None:
-        if self._countries is None:
-            rows = await self._request("GET", "/2.0/country", params={"limit": 2000})
-            table: dict[str, int] = {}
-            for row in rows or []:
-                code = row.get("iso_3166_alpha2") or row.get("iso3166_alpha2") or row.get("name_short")
-                if code and row.get("id"):
-                    table[str(code).upper()] = int(row["id"])
-            self._countries = table
-        return self._countries.get(iso2.upper())
-
-    async def create_contact(self, *, company: str | None, first_name: str, last_name: str, email: str, street: str, zip_code: str, city: str, country: str, phone: str | None, user_id: int | None) -> int:
-        body: dict[str, Any] = {
-            "contact_type_id": 1 if company else 2,
-            "name_1": company or last_name,
-            "mail": email,
-            "address": street,
-            "postcode": zip_code,
-            "city": city,
-        }
-        if company:
-            # bexio stores the contact person of a company contact separately; the order keeps the full name
-            body["name_2"] = f"{first_name} {last_name}".strip()
-        else:
-            body["name_2"] = first_name
-        if phone:
-            body["phone_fixed"] = phone
-        cid = await self.country_id(country)
-        if cid is not None:
-            body["country_id"] = cid
-        if user_id:
-            body["user_id"] = user_id
-            body["owner_id"] = user_id
-        data = await self._request("POST", "/2.0/contact", json_body=body)
-        if not isinstance(data, dict) or not data.get("id"):
-            raise ExternalError(self.service, "contact_create_failed", _message(data), retryable=False)
-        return int(data["id"])
-
-    async def invoice(self, invoice_id: int) -> dict[str, Any]:
-        data = await self._request("GET", f"/2.0/kb_invoice/{int(invoice_id)}")
-        if not isinstance(data, dict):
-            raise ExternalError(self.service, "invoice_invalid", retryable=False)
-        return data
-
-    @staticmethod
-    def status_id(invoice: dict[str, Any]) -> int | None:
-        for key in ("kb_item_status_id", "kb_invoice_status_id"):
-            if invoice.get(key) is not None:
-                try:
-                    return int(invoice[key])
-                except (TypeError, ValueError):
-                    return None
-        return None
 
 
 # ------------------------------------------------------------------------ Netim

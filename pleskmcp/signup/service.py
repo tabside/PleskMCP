@@ -24,7 +24,7 @@ from redis.asyncio import Redis
 from ..audit import AuditLog
 from ..config import Settings
 from ..plesk_api import KeyAuth, PleskClient, PleskError, PleskResultError, PleskSystemError
-from .clients import BexioClient, ExternalError, Mailer, NetimClient, PleskRestClient, RebillClient, ZammadClient
+from .clients import ExternalError, Mailer, NetimClient, PleskRestClient, RebillClient, ZammadClient
 from .config import SignupSettings
 from .forms import OrderInput, ascii_slug
 from .pricelist import PriceList
@@ -98,7 +98,6 @@ class SignupService:
         price_list: PriceList,
         *,
         rebill: RebillClient,
-        bexio: BexioClient,
         netim: NetimClient | None,
         zammad: ZammadClient,
         mailer: Mailer,
@@ -112,7 +111,6 @@ class SignupService:
         self._audit = audit
         self.price_list = price_list
         self.rebill = rebill
-        self.bexio = bexio
         self.netim = netim
         self.zammad = zammad
         self.mailer = mailer
@@ -244,43 +242,27 @@ class SignupService:
         return items
 
     async def ensure_billing(self, order: Order) -> Order:
-        """bexio contact, reBill subscription (first invoice now), Zammad ticket. Each step only once."""
+        """reBill subscription (contact matched or created by reBill in bexio, first invoice now), Zammad ticket. Each step only once."""
         order = (await self.store.get(order.id)) or order
         if order.status not in (AWAITING_PAYMENT,):
             return order
-        if not order.bexio_contact_id:
-            try:
-                contacts = await self.bexio.find_contacts_by_email(order.email)
-                if len(contacts) > 1:
-                    raise ExternalError("bexio", "ambiguous_contact", f"{len(contacts)} contacts", retryable=False)
-                if contacts:
-                    contact_id = int(contacts[0]["id"])
-                    created = False
-                else:
-                    contact_id = await self.bexio.create_contact(
-                        company=order.company,
-                        first_name=order.first_name,
-                        last_name=order.last_name,
-                        email=order.email,
-                        street=order.street,
-                        zip_code=order.zip,
-                        city=order.city,
-                        country=order.country,
-                        phone=order.phone,
-                        user_id=self.cfg.bexio_user_id,
-                    )
-                    created = True
-            except ExternalError as exc:
-                await self._fail_step(order, "bexio_contact", exc)
-                return (await self.store.get(order.id)) or order
-            await self.store.update(order.id, bexio_contact_id=contact_id)
-            await self.event(order.id, "bexio_contact", bexio_contact_id=contact_id, created=created)
-            order = (await self.store.get(order.id)) or order
-
         if not order.rebill_recurring_id:
+            contact: dict[str, Any] = {
+                "type": "company" if order.company else "private",
+                "email": order.email,
+                "address": order.street,
+                "postcode": order.zip,
+                "city": order.city,
+                "country_code": order.country,
+            }
+            if order.company:
+                contact["company_name"] = order.company
+            else:
+                contact["first_name"] = order.first_name
+                contact["last_name"] = order.last_name
             payload = {
                 "external_ref": self.external_ref(order),
-                "contact": {"bexio_id": int(order.bexio_contact_id)},
+                "contact": contact,
                 "interval": "yearly",
                 "lead_months": self.cfg.lead_months,
                 "currency_id": self.cfg.currency_id,
@@ -297,6 +279,8 @@ class SignupService:
                 await self._fail_step(order, "rebill_subscription", exc)
                 return (await self.store.get(order.id)) or order
             fields: dict[str, Any] = {"rebill_external_ref": self.external_ref(order), "rebill_recurring_id": subscription.get("recurring_id")}
+            if subscription.get("contact_bexio_id"):
+                fields["bexio_contact_id"] = int(subscription["contact_bexio_id"])
             newest = RebillClient.newest_invoice(subscription)
             if newest:
                 fields["bexio_invoice_id"] = int(newest["bexio_invoice_id"])
@@ -304,7 +288,7 @@ class SignupService:
             if subscription.get("next_period_start"):
                 fields["period_end"] = _iso(_parse(subscription["next_period_start"]) - timedelta(days=1)) if _parse(subscription["next_period_start"]) else None
             await self.store.update(order.id, **fields)
-            await self.event(order.id, "rebill_subscription", recurring_id=subscription.get("recurring_id"), first_invoice_queued=queued, existed=existed)
+            await self.event(order.id, "rebill_subscription", recurring_id=subscription.get("recurring_id"), first_invoice_queued=queued, existed=existed, bexio_contact_id=fields.get("bexio_contact_id"))
             order = (await self.store.get(order.id)) or order
 
         if not order.zammad_ticket_id:
@@ -329,29 +313,22 @@ class SignupService:
         return order
 
     # ------------------------------------------------------------------ payment
-    async def _invoice_status(self, invoice_id: int) -> str:
-        """paid | cancelled | open | draft | unknown from the bexio invoice status id."""
-        try:
-            invoice = await self.bexio.invoice(invoice_id)
-        except ExternalError as exc:
-            if exc.status == 404:  # reBill knows the id but bexio has not finished creating it yet
-                return "unknown"
-            raise
-        status_id = BexioClient.status_id(invoice)
-        if status_id in self.cfg.bexio_paid_status_ids:
-            return "paid"
-        if status_id in self.cfg.bexio_cancelled_status_ids:
-            return "cancelled"
-        if status_id == 7:
-            return "draft"
-        return "open"
+    @staticmethod
+    def _invoice_status(invoice: dict[str, Any]) -> str:
+        """paid | cancelled | draft | open | unknown from reBill's payment_status (synced from bexio)."""
+        status = str(invoice.get("payment_status") or "unknown")
+        if status in ("paid", "cancelled", "draft", "unknown"):
+            return status
+        return "open"  # pending, partial, unpaid
 
     async def _refresh_invoices(self, order: Order) -> tuple[Order, dict[str, Any] | None]:
-        """Pull the subscription from reBill, remember the newest invoice and its bexio status."""
-        subscription = await self.rebill.get_subscription(order.rebill_external_ref or self.external_ref(order))
+        """Let reBill refresh the invoice states from bexio, remember the newest invoice and its status."""
+        subscription = await self.rebill.sync_payments(order.rebill_external_ref or self.external_ref(order))
         fields: dict[str, Any] = {"subscription_active": bool(subscription.get("is_active", True)), "last_invoice_checked_at": int(time.time())}
         if subscription.get("recurring_id") and not order.rebill_recurring_id:
             fields["rebill_recurring_id"] = subscription["recurring_id"]
+        if subscription.get("contact_bexio_id") and not order.bexio_contact_id:
+            fields["bexio_contact_id"] = int(subscription["contact_bexio_id"])
         nps = _parse(subscription.get("next_period_start"))
         if nps:
             fields["period_end"] = _iso(nps - timedelta(days=1))
@@ -363,7 +340,7 @@ class SignupService:
             if not order.bexio_invoice_id:
                 fields["bexio_invoice_id"] = invoice_id
                 fields["invoice_due_date"] = newest.get("due_date")
-            fields["last_invoice_status"] = await self._invoice_status(invoice_id)
+            fields["last_invoice_status"] = self._invoice_status(newest)
         if not fields["subscription_active"] and not order.cancelled_at:
             fields["cancelled_at"] = int(time.time())
         await self.store.update(order.id, **fields)
@@ -377,7 +354,7 @@ class SignupService:
                 return order
             if order.paid_at:
                 return await self.activate(order)
-            if not order.rebill_recurring_id or not order.zammad_ticket_id or not order.bexio_contact_id:
+            if not order.rebill_recurring_id or not order.zammad_ticket_id:
                 order = await self.ensure_billing(order)
                 if order.status != AWAITING_PAYMENT or not order.rebill_recurring_id:
                     return order

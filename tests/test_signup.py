@@ -24,8 +24,22 @@ TODAY = date.today()
 
 
 # ----------------------------------------------------------------------- fakes
+STATUS_MAP = {7: "draft", 8: "pending", 9: "paid", 16: "partial", 19: "cancelled", 31: "unpaid"}
+
+
+@dataclass
+class FakeBexio:
+    """What reBill would see in bexio: known contacts by e-mail and the status id of every invoice."""
+
+    contacts: dict[str, int] = field(default_factory=dict)  # email -> bexio contact id
+    invoices: dict[int, int] = field(default_factory=dict)  # invoice id -> kb_item_status_id
+    created: list[dict[str, Any]] = field(default_factory=list)
+    next_contact_id = 700
+
+
 @dataclass
 class FakeRebill:
+    bexio: FakeBexio
     subscriptions: dict[str, dict[str, Any]] = field(default_factory=dict)
     calls: list[tuple[str, str, Any]] = field(default_factory=list)
     fail_create: bool = False
@@ -41,6 +55,23 @@ class FakeRebill:
         )
         return self.next_invoice_id
 
+    def _sync(self, sub: dict[str, Any]) -> dict[str, int]:
+        """Same rules as reBill's PaymentStatusSync: terminal states are never downgraded, unknown invoices count as failed."""
+        checked = updated = failed = 0
+        for inv in sub["invoices"]:
+            checked += 1
+            status_id = self.bexio.invoices.get(inv["bexio_invoice_id"])
+            if status_id is None:
+                failed += 1
+                continue
+            status = STATUS_MAP.get(status_id, "unknown")
+            if inv["payment_status"] in ("paid", "cancelled"):
+                continue
+            if inv["payment_status"] != status:
+                updated += 1
+            inv["payment_status"] = status
+        return {"checked": checked, "updated": updated, "failed": failed}
+
     def _handle(self, request: httpx.Request) -> httpx.Response:
         assert request.headers.get("authorization") == "Bearer rbl_test"
         path = request.url.path
@@ -52,8 +83,18 @@ class FakeRebill:
             ref = body["external_ref"]
             if ref in self.subscriptions:
                 return httpx.Response(409, json={"message": "exists", "subscription": self.subscriptions[ref]})
-            assert body["contact"]["bexio_id"] and body["interval"] == "yearly" and body["lead_months"] == 1 and body["mwst_type"] == 0 and body["run_now"] is True
+            contact = body["contact"]
+            assert contact["email"] and contact["country_code"] and contact["type"] in ("company", "private")
+            assert (contact["type"] == "company") == bool(contact.get("company_name"))
+            assert body["interval"] == "yearly" and body["lead_months"] == 1 and body["mwst_type"] == 0 and body["run_now"] is True
             assert body["items"][0]["text"] == "AI Hosting {{year}}/{{nextYear}}" and body["items"][0]["unit_price"] == 60.0
+            # reBill matches the bexio contact by e-mail, otherwise it creates one on the first run
+            bexio_id = self.bexio.contacts.get(contact["email"])
+            if bexio_id is None:
+                FakeBexio.next_contact_id += 1
+                bexio_id = FakeBexio.next_contact_id
+                self.bexio.contacts[contact["email"]] = bexio_id
+                self.bexio.created.append(contact)
             start = date.fromisoformat(body["start_date"])
             sub = {
                 "external_ref": ref,
@@ -64,6 +105,8 @@ class FakeRebill:
                 "start_date": start.isoformat(),
                 "next_run_date": start.isoformat(),
                 "next_period_start": start.replace(year=start.year + 1).isoformat(),
+                "contact_email": contact["email"],
+                "contact_bexio_id": bexio_id,
                 "items": body["items"],
                 "invoices": [],
             }
@@ -77,41 +120,13 @@ class FakeRebill:
             if sub is None:
                 return httpx.Response(404, json={"message": "not found"})
             return httpx.Response(200, json={"subscription": sub})
-        return httpx.Response(404, json={"message": f"unexpected {request.method} {path}"})
-
-
-@dataclass
-class FakeBexio:
-    contacts: dict[int, dict[str, Any]] = field(default_factory=dict)
-    invoices: dict[int, int] = field(default_factory=dict)  # invoice id -> kb_item_status_id
-    calls: list[tuple[str, str]] = field(default_factory=list)
-    next_contact_id = 700
-
-    def transport(self) -> httpx.MockTransport:
-        return httpx.MockTransport(self._handle)
-
-    def _handle(self, request: httpx.Request) -> httpx.Response:
-        assert request.headers.get("authorization") == "Bearer bexio_test"
-        path = request.url.path
-        self.calls.append((request.method, path))
-        if path == "/2.0/contact/search":
-            crit = json.loads(request.content)[0]
-            return httpx.Response(200, json=[c for c in self.contacts.values() if c.get(crit["field"]) == crit["value"]])
-        if path == "/2.0/country":
-            return httpx.Response(200, json=[{"id": 1, "name": "Schweiz", "name_short": "CH", "iso_3166_alpha2": "CH"}, {"id": 2, "name": "Deutschland", "name_short": "DE", "iso_3166_alpha2": "DE"}])
-        if path == "/2.0/contact" and request.method == "POST":
-            body = json.loads(request.content)
-            FakeBexio.next_contact_id += 1
-            contact = {"id": FakeBexio.next_contact_id, **body}
-            self.contacts[contact["id"]] = contact
-            return httpx.Response(201, json=contact)
-        m = re.match(r"^/2.0/kb_invoice/(\d+)$", path)
-        if m:
-            invoice_id = int(m.group(1))
-            if invoice_id not in self.invoices:
+        m = re.match(r"^/api/v1/subscriptions/([^/]+)/sync-payments$", path)
+        if m and request.method == "POST":
+            sub = self.subscriptions.get(m.group(1))
+            if sub is None:
                 return httpx.Response(404, json={"message": "not found"})
-            return httpx.Response(200, json={"id": invoice_id, "kb_item_status_id": self.invoices[invoice_id], "document_nr": f"RE-{invoice_id}"})
-        return httpx.Response(404, json={"message": f"unexpected {path}"})
+            return httpx.Response(200, json={"synced": self._sync(sub), "subscription": sub})
+        return httpx.Response(404, json={"message": f"unexpected {request.method} {path}"})
 
 
 @dataclass
@@ -271,8 +286,8 @@ async def senv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     plesk.users["admin"] = FakeUser(password="adminpw", type="admin")
     plesk.users["muster"] = FakeUser(password="x", name="Max Muster", base=400, domains=[{"name": "bestand.example", "sysuser": "bestand_sys", "docroot": "/var/www/vhosts/bestand.example/httpdocs"}])
     plesk.aliases.add("alias.example")
-    rebill, bexio, netim, zammad, mailer = FakeRebill(), FakeBexio(), FakeNetim(), FakeZammad(), FakeMailer()
-    bexio.contacts[55] = {"id": 55, "name_1": "Bestand GmbH", "mail": "bestand@example.com"}
+    bexio = FakeBexio(contacts={"bestand@example.com": 55})
+    rebill, netim, zammad, mailer = FakeRebill(bexio), FakeNetim(), FakeZammad(), FakeMailer()
     settings = Settings.load()
     assert settings.signup is not None and settings.signup.new_domains_enabled
     server = fakeredis.FakeServer()
@@ -284,7 +299,7 @@ async def senv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         store=store,
         redis=redis,
         plesk_transport=plesk.transport(),
-        signup_transports={"rebill": rebill.transport(), "bexio": bexio.transport(), "netim": netim.transport(), "zammad": zammad.transport()},
+        signup_transports={"rebill": rebill.transport(), "netim": netim.transport(), "zammad": zammad.transport()},
         signup_mailer=mailer,
     )
     app = build_app(services)
@@ -429,22 +444,24 @@ async def test_order_billing_and_ticket(senv: SignupEnv):
     assert r.status_code == 200, r.text
     o = await status_of(senv, r.json()["order_id"])
     assert o.status == "awaiting_payment" and o.terms_version == "2026-10" and o.domain_price == 13.5
-    # bexio: contact created (company), reBill subscription with both items, invoice known, Zammad ticket with internal note
-    assert o.bexio_contact_id in senv.bexio.contacts and senv.bexio.contacts[o.bexio_contact_id]["contact_type_id"] == 1
-    assert senv.bexio.contacts[o.bexio_contact_id]["country_id"] == 1
+    # reBill: contact passed as company with ISO country, subscription with both items, invoice known, Zammad ticket with internal note
+    assert senv.bexio.created[0] == {"type": "company", "company_name": "Beispiel AG", "email": "anna@example.com", "address": "Musterstrasse 1", "postcode": "8000", "city": "Zürich", "country_code": "CH"}
+    assert o.bexio_contact_id == senv.bexio.contacts["anna@example.com"]
     sub = senv.rebill.subscriptions[f"aihosting-{o.id}"]
     assert o.rebill_recurring_id == sub["recurring_id"] and len(sub["items"]) == 2 and sub["items"][1] == {"text": "Domain anna-beispiel.ch", "amount": 1, "unit_price": 13.5}
     assert o.bexio_invoice_id == 5001 and o.period_end == (TODAY.replace(year=TODAY.year + 1) - timedelta(days=1)).isoformat()
     assert o.zammad_ticket_id in senv.zammad.tickets
     article = senv.zammad.tickets[o.zammad_ticket_id]["article"]["body"]
     assert "anna-beispiel.ch" in article and "5001" in article and f"aihosting-{o.id}" in article
-    # existing bexio contact is reused, not duplicated
+    # an existing bexio contact (matched by reBill via e-mail) is reused, not duplicated
     r = await order(senv, email="bestand@example.com", domain="zweite.ch")
     o2 = await status_of(senv, r.json()["order_id"])
-    assert o2.bexio_contact_id == 55
+    assert o2.bexio_contact_id == 55 and len(senv.bexio.created) == 1
+    # private customers are passed with first and last name
+    assert senv.rebill.subscriptions[f"aihosting-{o2.id}"]["contact_email"] == "bestand@example.com"
     # audit events carry ids only
     events = await senv.service.store.events(o.id)
-    assert {e["event"] for e in events} >= {"order_created", "bexio_contact", "rebill_subscription", "zammad_ticket"}
+    assert {e["event"] for e in events} >= {"order_created", "rebill_subscription", "zammad_ticket"}
     assert "anna" not in json.dumps(events)
     audit = open(senv.services.settings.audit_log_file, encoding="utf-8").read()
     assert "signup_order_created" in audit and "anna@example.com" not in audit
@@ -598,7 +615,7 @@ async def test_cancellation_and_deletion(senv: SignupEnv):
     # a failing backup goes to needs_attention and never deletes
     o3 = await activate(senv, email="d@example.com", domain_mode="own", domain="backupfehler.example", phone="")
     await senv.service.store.update(o3.id, status="suspended", suspend_reason="unpaid", suspended_at=int(time.time()) - 100, delete_after=int(time.time()) - 1)
-    senv.bexio.invoices[o3.bexio_invoice_id] = 8
+    senv.bexio.invoices[senv.rebill.add_invoice(f"aihosting-{o3.id}", due_in_days=-20)] = 8  # a newer, open invoice (paid ones are never downgraded)
     senv.plesk.cli_fail = True
     await senv.service.run_lifecycle()
     await senv.service.wait_for_backups()
@@ -610,7 +627,7 @@ async def test_cancellation_and_deletion(senv: SignupEnv):
     senv.service.cfg.__dict__["delete_backup_mode"] = "manual"
     o = await activate(senv, email="e@example.com", domain_mode="own", domain="manuell.example", phone="")
     await senv.service.store.update(o.id, status="suspended", suspend_reason="unpaid", suspended_at=int(time.time()) - 100, delete_after=int(time.time()) - 1)
-    senv.bexio.invoices[o.bexio_invoice_id] = 8
+    senv.bexio.invoices[senv.rebill.add_invoice(f"aihosting-{o.id}", due_in_days=-20)] = 8  # a newer, open invoice (paid ones are never downgraded)
     await senv.service.run_lifecycle()
     o = await status_of(senv, o.id)
     assert o.status == "pending_deletion" and o.plesk_login in senv.plesk.users and any("Admin-Übersicht" in n for _, n in senv.zammad.notes)
@@ -626,7 +643,7 @@ async def test_cancellation_and_deletion(senv: SignupEnv):
     senv.service.cfg.__dict__["delete_backup_mode"] = "none"
     o2 = await activate(senv, email="c@example.com", domain_mode="own", domain="auto.example", phone="")
     await senv.service.store.update(o2.id, status="suspended", suspend_reason="unpaid", suspended_at=int(time.time()) - 100, delete_after=int(time.time()) - 1)
-    senv.bexio.invoices[o2.bexio_invoice_id] = 8
+    senv.bexio.invoices[senv.rebill.add_invoice(f"aihosting-{o2.id}", due_in_days=-20)] = 8  # a newer, open invoice (paid ones are never downgraded)
     await senv.service.run_lifecycle()
     assert (await status_of(senv, o2.id)).status == "deleted"
 
@@ -674,12 +691,12 @@ async def test_billing_failure_is_retried_by_the_scheduler(senv: SignupEnv):
     r = await order(senv)
     assert r.status_code == 200
     o = await status_of(senv, r.json()["order_id"])
-    assert o.status == "awaiting_payment" and o.bexio_contact_id and not o.rebill_recurring_id and o.attempts == 1
+    assert o.status == "awaiting_payment" and not o.rebill_recurring_id and o.attempts == 1
     senv.rebill.fail_create = False
     await senv.service.run_payment_polls()
     o = await status_of(senv, o.id)
-    assert o.rebill_recurring_id and o.zammad_ticket_id and o.bexio_invoice_id and o.last_invoice_status == "unknown"
-    assert sum(1 for c in senv.bexio.calls if c == ("POST", "/2.0/contact")) == 1
+    assert o.rebill_recurring_id and o.zammad_ticket_id and o.bexio_invoice_id and o.bexio_contact_id and o.last_invoice_status == "unknown"
+    assert len(senv.rebill.subscriptions) == 1 and len(senv.bexio.created) == 1
 
 
 async def test_readyz_and_cli_listing(senv: SignupEnv):

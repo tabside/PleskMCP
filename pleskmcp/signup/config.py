@@ -1,7 +1,7 @@
 """Configuration of the signup service (all from environment variables, see .env.example).
 
 The whole feature is off unless SIGNUP_ENABLED=true. With it on, the credentials of
-reBill, bexio, Netim (only when new domains are orderable), Plesk, Zammad and SMTP are
+reBill (which carries the bexio connection), Netim (only when new domains are orderable), Plesk, Zammad and SMTP are
 required and the api refuses to start when one is missing.
 """
 
@@ -47,13 +47,6 @@ class SignupSettings:
     # reBill
     rebill_api_url: str
     rebill_api_token: str
-
-    # bexio
-    bexio_api_url: str
-    bexio_api_token: str
-    bexio_user_id: int | None  # owner of contacts the service creates; None: bexio default
-    bexio_paid_status_ids: list[int]
-    bexio_cancelled_status_ids: list[int]
 
     # Netim
     netim_api_url: str
@@ -174,11 +167,6 @@ def load_signup_settings(*, public_base_url: str, plesk_url: str, data_encryptio
         product_title=_env("SIGNUP_PRODUCT_TITLE", "AI Hosting") or "AI Hosting",
         rebill_api_url=req("REBILL_API_URL").rstrip("/"),
         rebill_api_token=req("REBILL_API_TOKEN"),
-        bexio_api_url=(_env("BEXIO_API_URL", "https://api.bexio.com") or "").rstrip("/"),
-        bexio_api_token=req("BEXIO_API_TOKEN"),
-        bexio_user_id=_env_int("BEXIO_USER_ID", 0) or None,
-        bexio_paid_status_ids=[int(x) for x in _env_list("BEXIO_PAID_STATUS_IDS", ["9"])],
-        bexio_cancelled_status_ids=[int(x) for x in _env_list("BEXIO_CANCELLED_STATUS_IDS", ["19"])],
         netim_api_url=(_env("NETIM_API_URL", "https://rest.netim.com/1.0") or "").rstrip("/"),
         netim_login=netim_login,
         netim_secret=netim_secret,
