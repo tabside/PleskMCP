@@ -121,7 +121,8 @@ Mit `SIGNUP_ENABLED=true` nimmt die api Bestellungen für den Plan "AI Hosting" 
 ### Ablauf
 
 ```
-Website /ki-hosting/bestellen/  --POST /signup-->  api: Prüfungen, Bestellung (awaiting_payment)
+Website /ki-hosting/bestellen/  --POST /signup-->  api: Prüfungen, Bestellung (awaiting_confirmation), Bestätigungsmail
+Kunde klickt Link            --GET /signup/confirm/{token}-->  api: Domain erneut geprüft, awaiting_payment
                                                     |-- reBill: Abo (jährlich, lead_months 1, run_now) -> erste Rechnung sofort;
                                                     |          reBill sucht den bexio-Kontakt per E-Mail oder legt ihn an
                                                     `-- Zammad: Ticket in "Web TAB", Kunde = Besteller, nur interne Notizen
@@ -137,6 +138,8 @@ scheduler stündlich:  aktive und gesperrte Bestellungen (Rechnungen, Kündigung
 Zustände einer Bestellung:
 
 ```
+awaiting_confirmation --E-Mail bestätigt--> awaiting_payment --bezahlt--> activating
+        `--Link 48 h nicht geklickt / Domain inzwischen vergeben--> expired (nichts verrechnet)
 awaiting_payment --bezahlt--> activating --ok--> active --Rechnung 10 Tage überfällig--> suspended --bezahlt--> active
                                   |                 |--Abo in reBill deaktiviert, Laufzeit abgelaufen--> suspended
                                   |                                                                        |--60 Tage--> pending_deletion --Plesk-Backup erstellt--> deleted
@@ -153,8 +156,9 @@ awaiting_payment --bezahlt--> activating --ok--> active --Rechnung 10 Tage über
 | `GET /signup/config` | Preisliste, Länder, AGB-Version (CORS für `SIGNUP_ALLOWED_ORIGINS`) |
 | `GET /signup/token` | Formular-Token: HMAC über Zeitstempel und Nonce, zustandslos; gilt frühestens nach `SIGNUP_MIN_FILL_SECONDS`, höchstens `SIGNUP_TOKEN_MAX_AGE`, einmalig (Nonce in Redis) |
 | `GET /signup/check-domain?domain=` | Live-Verfügbarkeit bei Netim (nur bestellbare Endungen, 60 s Cache, Limit pro IP) |
-| `POST /signup` | Bestellung (JSON oder Formular-POST). Schutz: nur HTTPS, Origin-Prüfung, Honeypot-Feld `website` (Antwort sieht wie Erfolg aus, nichts wird angelegt), Token, Limits pro IP (`SIGNUP_RATE_LIMIT_IP`/h) und pro E-Mail (`SIGNUP_RATE_LIMIT_EMAIL`/Tag), Validierung aller Felder serverseitig. Antworten verraten nie, ob eine E-Mail-Adresse schon Kunde ist. |
-| `GET /signup/thanks/{id}` | eingebaute Bestätigungsseite (wenn `SIGNUP_SUCCESS_URL` leer ist) |
+| `POST /signup` | Bestellung (JSON oder Formular-POST). Legt die Bestellung an und schickt nur die Bestätigungsmail; Rechnung, reBill-Abo und Ticket entstehen erst nach dem Klick auf den Link (`SIGNUP_CONFIRM_TTL_HOURS`, 48 h). Eine unbestätigte Bestellung reserviert die Domain nicht; dieselbe E-Mail mit derselben Domain schickt die Bestätigungsmail erneut. Schutz: nur HTTPS, Origin-Prüfung, Honeypot-Feld `website` (Antwort sieht wie Erfolg aus, nichts wird angelegt), Token, Limits pro IP (`SIGNUP_RATE_LIMIT_IP`/h) und pro E-Mail (`SIGNUP_RATE_LIMIT_EMAIL`/Tag), Validierung aller Felder serverseitig. Antworten verraten nie, ob eine E-Mail-Adresse schon Kunde ist. |
+| `GET /signup/confirm/{token}` | Link aus der Bestätigungsmail: Domain erneut geprüft, Bestellung auf `awaiting_payment`, reBill-Abo, Rechnung und Ticket; danach Weiterleitung auf die Danke-Seite mit `step=confirmed`. Abgelaufen, unbekannt oder Domain inzwischen vergeben: Hinweisseite, Bestellung verfällt ohne Kosten |
+| `GET /signup/thanks/{id}` | eingebaute Seite nach der Bestellung ("E-Mail bestätigen") und nach der Bestätigung (`?step=confirmed`, "Rechnung kommt"); mit `SIGNUP_SUCCESS_URL` übernimmt die Website das (`?order=<id>&step=confirm|confirmed`) |
 | `GET /signup/welcome/{token}` | Einmal-Link aus der Willkommensmail: erzeugt per XML API `server create_session` einen Session-Token für den Kunden und leitet auf `rsession_init.php` um; danach ist der Link verbraucht. Abgelaufen oder verbraucht: Hinweis auf "Passwort vergessen" (`get_password.php`). `PLESK_LOGIN_LINK_MODE=reset_page` verlinkt stattdessen direkt die Passwort-vergessen-Seite. |
 | `GET /signup/admin` | Übersicht aller Bestellungen (HTTP Basic, `SIGNUP_ADMIN_USER`/`SIGNUP_ADMIN_PASSWORD`): Status, Rechnung, Plesk, Netim, Verlauf; Aktionen "Erneut versuchen", "Jetzt prüfen", "Backup erledigt, löschen" (Löschung ohne Warten auf das automatische Backup) |
 

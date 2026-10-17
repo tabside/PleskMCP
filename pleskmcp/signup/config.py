@@ -92,6 +92,7 @@ class SignupSettings:
     backup_timeout: int  # seconds the pleskbackup call may take
     max_attempts: int
     welcome_link_ttl_days: int
+    confirm_ttl_hours: int  # how long the e-mail confirmation link is valid
     netim_operation_timeout_hours: int
 
     # admin overview
@@ -202,6 +203,7 @@ def load_signup_settings(*, public_base_url: str, plesk_url: str, data_encryptio
         backup_timeout=_env_int("SIGNUP_BACKUP_TIMEOUT", 3600),
         max_attempts=_env_int("SIGNUP_MAX_ATTEMPTS", 5),
         welcome_link_ttl_days=_env_int("SIGNUP_WELCOME_LINK_TTL_DAYS", 7),
+        confirm_ttl_hours=_env_int("SIGNUP_CONFIRM_TTL_HOURS", 48),
         netim_operation_timeout_hours=_env_int("NETIM_OPERATION_TIMEOUT_HOURS", 72),
         admin_user=admin_user,
         admin_password=admin_password,

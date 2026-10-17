@@ -334,10 +334,31 @@ async def token(senv: SignupEnv) -> str:
     return r.json()["token"]
 
 
-async def order(senv: SignupEnv, **overrides: Any) -> httpx.Response:
+async def order(senv: SignupEnv, confirm: bool = True, **overrides: Any) -> httpx.Response:
+    """Place an order; by default the confirmation link from the mail is followed right away (billing starts)."""
     form = {**FORM, **overrides}
     form.setdefault("token", await token(senv))
-    return await senv.client.post("/plesk/signup", json=form, headers={"origin": "https://www.example.com", "accept": "application/json"})
+    r = await senv.client.post("/plesk/signup", json=form, headers={"origin": "https://www.example.com", "accept": "application/json"})
+    if confirm and r.status_code == 200 and r.json().get("ok") and r.json().get("step") == "confirm" and r.json().get("created", True):
+        await follow_confirmation(senv, r.json()["order_id"])
+    return r
+
+
+def confirmation_mails(senv: SignupEnv) -> list[dict[str, str]]:
+    return [m for m in senv.mailer.sent if m["subject"].startswith("Bitte bestätigen")]
+
+
+def welcome_mails(senv: SignupEnv) -> list[dict[str, str]]:
+    return [m for m in senv.mailer.sent if "freigeschaltet" in m["subject"]]
+
+
+async def follow_confirmation(senv: SignupEnv, order_id: str) -> httpx.Response:
+    mails = [m for m in confirmation_mails(senv) if f"Bestell-Nr. {order_id}" in m["text"]]
+    assert mails, "no confirmation mail"
+    link = re.search(r"https://mcp\.example\.com/plesk/signup/confirm/([A-Za-z0-9_-]+)", mails[-1]["text"]).group(1)
+    r = await senv.client.get(f"/plesk/signup/confirm/{link}")
+    assert r.status_code == 303, r.text
+    return r
 
 
 def status_of(senv: SignupEnv, order_id: str):
@@ -473,7 +494,7 @@ async def test_unpaid_stays_waiting_then_paid_activates(senv: SignupEnv):
     senv.bexio.invoices[o.bexio_invoice_id] = 8  # pending
     assert await senv.service.run_payment_polls() == 1
     o = await status_of(senv, o.id)
-    assert o.status == "awaiting_payment" and o.last_invoice_status == "open" and not senv.plesk.created_customers and not senv.mailer.sent
+    assert o.status == "awaiting_payment" and o.last_invoice_status == "open" and not senv.plesk.created_customers and not welcome_mails(senv)
 
     senv.bexio.invoices[o.bexio_invoice_id] = 9  # paid
     await senv.service.run_payment_polls()
@@ -490,7 +511,7 @@ async def test_unpaid_stays_waiting_then_paid_activates(senv: SignupEnv):
     assert o.plesk_login == "beispiel" and o.plesk_webspace_id == ws["id"] and o.sysuser.startswith("annabeispi_")
     assert "passwd" not in json.dumps(o.data) and senv.plesk.users["beispiel"].password not in json.dumps(o.data)
     # 3./4. welcome mail: password link, panel URL, nameservers, AI guide, account page, real umlauts
-    mail = senv.mailer.sent[0]
+    mail = welcome_mails(senv)[0]
     assert mail["to"] == "anna@example.com" and "anna-beispiel.ch" in mail["subject"]
     link = re.search(r"https://mcp\.example\.com/plesk/signup/welcome/([A-Za-z0-9_-]+)", mail["text"]).group(1)
     assert "https://plesk.example.com:8443/login_up.php" in mail["text"] and "Benutzername: beispiel" in mail["text"]
@@ -507,7 +528,7 @@ async def test_unpaid_stays_waiting_then_paid_activates(senv: SignupEnv):
     assert r.status_code == 410 and "get_password.php" in r.text
     # a second poll changes nothing (idempotent)
     await senv.service.run_payment_polls()
-    assert len(senv.plesk.created_customers) == 1 and len(senv.mailer.sent) == 1 and len(senv.netim.contacts) == 1
+    assert len(senv.plesk.created_customers) == 1 and len(welcome_mails(senv)) == 1 and len(senv.netim.contacts) == 1
 
 
 async def test_activation_retries_and_needs_attention(senv: SignupEnv):
@@ -524,7 +545,7 @@ async def test_activation_retries_and_needs_attention(senv: SignupEnv):
     senv.mailer.fail = False
     await senv.service.run_payment_polls()
     o = await status_of(senv, o.id)
-    assert o.status == "active" and len(senv.mailer.sent) == 1 and "A-Record" in senv.mailer.sent[0]["text"] and "203.0.113.10" in senv.mailer.sent[0]["text"]
+    assert o.status == "active" and len(welcome_mails(senv)) == 1 and "A-Record" in welcome_mails(senv)[0]["text"] and "203.0.113.10" in welcome_mails(senv)[0]["text"]
 
     # a non-retryable failure (registry refuses the domain) goes to needs_attention with a Zammad note
     senv.netim.fail_register = True
@@ -707,3 +728,62 @@ async def test_readyz_and_cli_listing(senv: SignupEnv):
 
     text = admin_json(await senv.service.store.list())
     assert "anna-beispiel.ch" in text and "welcome_token_hash" not in text
+
+
+async def test_email_confirmation_gate(senv: SignupEnv):
+    # the order alone sends one confirmation mail and nothing else: no reBill, no Zammad, no reservation of the domain
+    r = await order(senv, confirm=False)
+    assert r.status_code == 200 and r.json()["step"] == "confirm" and r.json()["redirect"].endswith("step=confirm")
+    o = await status_of(senv, r.json()["order_id"])
+    assert o.status == "awaiting_confirmation" and not o.rebill_recurring_id and not o.zammad_ticket_id
+    assert len(senv.rebill.subscriptions) == 0 and len(senv.zammad.tickets) == 0
+    mails = confirmation_mails(senv)
+    assert len(mails) == 1 and mails[0]["to"] == "anna@example.com" and f"Bestell-Nr. {o.id}" in mails[0]["text"] and "48 Stunden" in mails[0]["text"]
+    # built-in thanks page asks for the confirmation
+    page = await senv.client.get(f"/plesk/signup/thanks/{o.id}")
+    assert "bestätigen" in page.text and "Rechnung" in page.text
+    # a second submit with the same e-mail and domain resends the mail instead of creating a second order
+    r2 = await order(senv, confirm=False)
+    assert r2.json()["order_id"] == o.id and r2.json()["created"] is False and len(confirmation_mails(senv)) == 2
+    # another customer may still order the same domain while it is unconfirmed (no reservation by fake orders)
+    r3 = await order(senv, confirm=False, email="other@example.com")
+    assert r3.status_code == 200 and r3.json()["created"]
+    # wrong token
+    bad = await senv.client.get("/plesk/signup/confirm/nicht-vorhanden")
+    assert bad.status_code == 404
+    # the (newest) link confirms: billing starts, redirect to the confirmed page
+    r = await follow_confirmation(senv, o.id)
+    assert r.headers["location"].endswith(f"/signup/thanks/{o.id}?step=confirmed")
+    o = await status_of(senv, o.id)
+    assert o.status == "awaiting_payment" and o.confirmed_at and o.rebill_recurring_id and o.zammad_ticket_id and o.bexio_invoice_id
+    page = await senv.client.get(r.headers["location"].replace("https://mcp.example.com", ""))
+    assert "bestätigt" in page.text and "Rechnung" in page.text
+    # the older link of the same order is gone (token replaced), the used one lands on "already"
+    first_link = re.search(r"/signup/confirm/([A-Za-z0-9_-]+)", mails[0]["text"]).group(1)
+    assert (await senv.client.get(f"/plesk/signup/confirm/{first_link}")).status_code == 404
+    # the other customer's confirmation now fails because the domain is reserved by the confirmed order
+    o3 = await status_of(senv, r3.json()["order_id"])
+    link3 = re.search(r"/signup/confirm/([A-Za-z0-9_-]+)", [m for m in confirmation_mails(senv) if m["to"] == "other@example.com"][-1]["text"]).group(1)
+    failed = await senv.client.get(f"/plesk/signup/confirm/{link3}")
+    assert failed.status_code == 410 and "nicht mehr verfügbar" in failed.text
+    o3 = await status_of(senv, o3.id)
+    assert o3.status == "expired" and len(senv.rebill.subscriptions) == 1
+    events = await senv.service.store.events(o.id)
+    assert {e["event"] for e in events} >= {"order_created", "confirmation_mail_sent", "email_confirmed", "rebill_subscription"}
+    assert "anna" not in json.dumps(events)
+
+
+async def test_unconfirmed_orders_expire_without_billing(senv: SignupEnv):
+    r = await order(senv, confirm=False)
+    o = await status_of(senv, r.json()["order_id"])
+    await senv.service.store.update(o.id, confirm_expires=int(time.time()) - 1)
+    assert await senv.service.run_payment_polls() == 0
+    o = await status_of(senv, o.id)
+    assert o.status == "expired" and o.confirm_token_hash is None and not senv.rebill.subscriptions and not senv.zammad.tickets
+    # the link from the mail is refused as expired
+    link = re.search(r"/signup/confirm/([A-Za-z0-9_-]+)", confirmation_mails(senv)[-1]["text"]).group(1)
+    assert (await senv.client.get(f"/plesk/signup/confirm/{link}")).status_code == 404
+    # a failing mail server rejects the order instead of leaving a silent one behind
+    senv.mailer.fail = True
+    r = await order(senv, confirm=False, email="c@example.com", domain="mailfehler.ch")
+    assert r.status_code == 503 and r.json()["error"] == "mail_failed"

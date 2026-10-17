@@ -31,15 +31,17 @@ from .pricelist import PriceList
 from .store import (
     ACTIVATING,
     ACTIVE,
+    AWAITING_CONFIRMATION,
     AWAITING_PAYMENT,
     DELETED,
     NEEDS_ATTENTION,
     PENDING_DELETION,
+    EXPIRED,
     SUSPENDED,
     Order,
     SignupStore,
 )
-from .templates import render_welcome
+from .templates import render_confirmation, render_welcome
 
 logger = logging.getLogger(__name__)
 
@@ -176,18 +178,14 @@ class SignupService:
         await self._redis.set(cache_key, "1" if available else "0", ex=60)
         return available, reason
 
-    async def submit(self, data: OrderInput, *, client_ip: str) -> tuple[Order, bool]:
-        """Create the order (duplicate and domain checks first), then start billing. Returns (order, created)."""
-        existing = await self.store.find_awaiting_duplicate(data.email, data.domain)
-        if existing is not None:
-            await self.event(existing.id, "duplicate_submission")
-            return existing, False
-        open_order = await self.store.find_open_by_domain(data.domain)
+    async def _domain_free(self, domain: str, domain_mode: str) -> None:
+        """Raises OrderRejected when the domain is taken: open order, existing in Plesk (own) or not available at Netim (new)."""
+        open_order = await self.store.find_open_by_domain(domain)
         if open_order is not None:
             raise OrderRejected("domain_ordered", "domain", "Für diese Domain liegt bereits eine Bestellung vor.")
-        if data.domain_mode == "own":
+        if domain_mode == "own":
             try:
-                kind = await self._plesk.domain_exists(self._plesk_auth, data.domain)
+                kind = await self._plesk.domain_exists(self._plesk_auth, domain)
             except (PleskError, PleskSystemError, PleskResultError) as exc:
                 logger.error("plesk domain check failed: %s", exc)
                 raise OrderRejected("plesk_unavailable", "domain", "Die Prüfung der Domain ist gerade nicht möglich. Bitte in einigen Minuten erneut versuchen.") from exc
@@ -195,14 +193,27 @@ class SignupService:
                 raise OrderRejected("domain_exists", "domain", "Diese Domain ist auf unserem Server bereits eingerichtet. Bitte melden Sie sich bei uns, falls das Ihre Domain ist.")
         else:
             try:
-                available, _ = await self.check_domain_available(data.domain)
+                available, _ = await self.check_domain_available(domain)
             except ExternalError as exc:
                 raise OrderRejected("netim_unavailable", "domain", "Die Verfügbarkeitsprüfung ist gerade nicht möglich. Bitte in einigen Minuten erneut versuchen.") from exc
             if not available:
                 raise OrderRejected("domain_unavailable", "domain", "Diese Domain ist nicht verfügbar.")
 
+    async def submit(self, data: OrderInput, *, client_ip: str) -> tuple[Order, bool]:
+        """Create the order (duplicate and domain checks first) and send the confirmation mail. Returns (order, created).
+
+        Nothing is billed before the customer confirms the e-mail address (confirm()), so a fake order
+        with somebody else's address only produces one confirmation mail to that address."""
+        existing = await self.store.find_awaiting_duplicate(data.email, data.domain)
+        if existing is not None:
+            await self.event(existing.id, "duplicate_submission")
+            if existing.status == AWAITING_CONFIRMATION:
+                await self.send_confirmation(existing)
+            return existing, False
+        await self._domain_free(data.domain, data.domain_mode)
+
         order = await self.store.create_order(
-            status=AWAITING_PAYMENT,
+            status=AWAITING_CONFIRMATION,
             company=data.company,
             first_name=data.first_name,
             last_name=data.last_name,
@@ -224,12 +235,55 @@ class SignupService:
             attempts=0,
         )
         await self.event(order.id, "order_created", domain_mode=data.domain_mode, tld=order.tld, terms_version=data.terms_version)
+        await self.send_confirmation(order)
+        return (await self.store.get(order.id)) or order, True
+
+    async def send_confirmation(self, order: Order) -> None:
+        """New single-use token (replacing an earlier one) and the confirmation mail."""
+        token = secrets.token_urlsafe(32)
+        expires = int(time.time()) + self.cfg.confirm_ttl_hours * 3600
+        await self.store.update(order.id, confirm_token_hash=hashlib.sha256(token.encode()).hexdigest(), confirm_expires=expires)
+        order = (await self.store.get(order.id)) or order
+        subject, text = render_confirmation(order, self.cfg, self._settings, token=token)
+        try:
+            await self.mailer.send(to=order.email, subject=subject, text=text)
+        except ExternalError as exc:
+            await self.event(order.id, "confirmation_mail_failed", error=exc.code)
+            raise OrderRejected("mail_failed", "email", "Die Bestätigungsmail konnte nicht gesendet werden. Bitte die Adresse prüfen oder später erneut versuchen.") from exc
+        await self.event(order.id, "confirmation_mail_sent")
+
+    async def confirm(self, token: str) -> tuple[str, Order | None]:
+        """Link from the confirmation mail. Returns (outcome, order): confirmed | already | expired | domain_taken | invalid."""
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        order = await self.store.find_by_confirm_token(token_hash)
+        if order is None:
+            return "invalid", None
+        if order.status != AWAITING_CONFIRMATION:
+            return "already", order
+        if not order.confirm_expires or time.time() > int(order.confirm_expires):
+            return "expired", order
+        try:
+            await self._domain_free(order.domain, order.domain_mode)  # somebody else may have taken it meanwhile
+        except OrderRejected as exc:
+            await self.store.set_status(order.id, EXPIRED, confirm_token_hash=None, last_error=exc.code)
+            await self.event(order.id, "confirmation_rejected", reason=exc.code)
+            return "domain_taken", order
+        if not await self.store.confirm(order.id, token_hash):
+            return "already", order
+        await self.event(order.id, "email_confirmed")
         try:
             async with self.lock(order.id):
-                await self.ensure_billing(order)
+                await self.ensure_billing((await self.store.get(order.id)) or order)
         except Busy:
             pass
-        return (await self.store.get(order.id)) or order, True
+        return "confirmed", (await self.store.get(order.id)) or order
+
+    async def expire_unconfirmed(self) -> int:
+        """Scheduler: orders whose confirmation link expired are closed without any billing."""
+        ids = await self.store.expire_unconfirmed(older_than=int(time.time()))
+        for order_id in ids:
+            await self.event(order_id, "confirmation_expired")
+        return len(ids)
 
     # ------------------------------------------------------------------ billing
     def external_ref(self, order: Order) -> str:
@@ -756,6 +810,10 @@ class SignupService:
     # ------------------------------------------------------------ scheduler API
     async def run_payment_polls(self) -> int:
         count = 0
+        try:
+            await self.expire_unconfirmed()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("expiring unconfirmed orders crashed: %s", exc)
         for order in await self.store.list(status=AWAITING_PAYMENT):
             try:
                 await self.poll_payment(order)

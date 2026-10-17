@@ -54,3 +54,18 @@ def render_welcome(order: "Order", cfg: "SignupSettings", settings: "Settings", 
         sender_name=sender_name,
     )
     return f"{cfg.product_title} für {order.domain} ist freigeschaltet", text
+
+
+def render_confirmation(order: "Order", cfg: "SignupSettings", settings: "Settings", *, token: str) -> tuple[str, str]:
+    template = _load("confirm_de.txt")
+    sender_name = cfg.mail_from.split("<")[0].strip().strip('"') or settings.service_name
+    text = template.format(
+        name=order.display_name,
+        product=cfg.product_title,
+        domain=order.domain,
+        order_id=order.id,
+        confirm_link=f"{settings.public_base_url}/signup/confirm/{token}",
+        ttl_hours=cfg.confirm_ttl_hours,
+        sender_name=sender_name,
+    )
+    return f"Bitte bestätigen: Ihre Bestellung {cfg.product_title} für {order.domain}", text
