@@ -265,6 +265,24 @@ CLI im Container (`docker compose exec api pleskmcp <befehl>`):
 
 Daten: Postgres und Redis in eigenen Volumes, das Audit-Log im Volume `/data` (`audit.log`) und zusätzlich auf stdout. Sicherungen, Papierkorb und Dumps liegen in den Abonnements der Kunden und zählen zu deren Speicherplatz.
 
+### Fehlersuche: Fehlercodes in Tool-Antworten
+
+Jede Fehlermeldung an den Client endet mit einem Code in eckigen Klammern. Details wie Hostnamen, Pfade oder Ausnahmetexte stehen nur im Log des Workers (`docker compose logs worker`), nie in der Antwort.
+
+| Code | Bedeutung | Abhilfe |
+|---|---|---|
+| `ssh_config` | Der Worker kann den privaten Schlüssel (`PLESK_SSH_KEY_PATH`) oder den Host-Key (`PLESK_SSH_HOST_KEY`/`PLESK_SSH_KNOWN_HOSTS`) nicht verwenden: Datei fehlt, nicht lesbar, Schlüssel mit Passphrase, falsches Format. | `/readyz` zeigt unter `ssh_preflight_errors` die genaue Ursache (der Worker prüft beides beim Start). `pleskmcp check` im Container. Schlüssel ohne Passphrase (`ssh-keygen -N ""`), Host-Key nur als `typ base64`. |
+| `ssh_auth` | Der Plesk-Server lehnt den Schlüssel ab. | `install.sh` mit dem passenden Public Key erneut ausführen; `authorized_keys` des Benutzers `pleskmcp` prüfen. |
+| `ssh_unreachable` | Verbindung zum Plesk-Server scheitert oder bricht ab (Netz, Firewall, Port, Timeout). | Erreichbarkeit von `PLESK_SSH_HOST:PLESK_SSH_PORT` aus dem Worker-Container prüfen. |
+| `sudo_refused` | sudoers-Regel fehlt oder passt nicht zum Systembenutzer. | `install.sh` erneut ausführen; `/var/log/secure` auf dem Plesk-Server zeigt den abgelehnten Aufruf. |
+| `helper_crash` | Das Hilfsskript hat kein gültiges JSON geliefert (veraltete Version, Absturz). | `git pull` und `install.sh` auf dem Plesk-Server; Traceback im Worker-Log. |
+| `helper_timeout` / `timeout` | Zeitlimit des Aufrufs bzw. des Hilfsskripts überschritten. | Bei grossen Logs oder Verzeichnissen: Hintergrundjob abwarten (`job_status`), Limits prüfen. |
+| `worker_lost` | Der Job wurde zweimal von einem verschwundenen Worker zurückgestellt. | Worker-Container prüfen (Healthcheck, Neustarts). |
+| `internal` | Unerwartete Ausnahme im Worker; die Antwort nennt den Ausnahmetyp in Klammern. | Traceback im Worker-Log, Fehler bitte melden. |
+| `not_owner`, `quota_exceeded`, `not_found`, `protected`, ... | Fachliche Fehler des Hilfsskripts, Meldung an den Kunden ist selbsterklärend. | |
+
+`/readyz` liefert zusätzlich `ssh_preflight` (`ok`, `failed`, `unknown`): jeder Worker prüft beim Start Schlüsseldatei und Host-Key und hinterlegt das Ergebnis in Redis.
+
 ### Umgebungsvariablen mit Defaults
 
 | Variable | Default | Bedeutung |

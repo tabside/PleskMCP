@@ -305,16 +305,21 @@ def cmd_check(args: argparse.Namespace) -> int:
             except Exception as exc:  # noqa: BLE001
                 print(f"redis NOT reachable: {exc}")
                 rc = 1
-            if args.sysuser and args.docroot and args.domain:
-                pool = SSHPool(accounts._settings)  # noqa: SLF001
-                try:
-                    result = await pool.run(args.sysuser, {"v": 2, "op": "ping", "domain": args.domain, "docroot": args.docroot, "args": {}})
-                    print(f"SSH helper OK: {json.dumps(result)}")
-                except Exception as exc:  # noqa: BLE001
-                    print(f"SSH helper FAILED: {exc}")
+            pool = SSHPool(accounts._settings)  # noqa: SLF001
+            try:
+                ok, message = await pool.preflight()
+                print(f"SSH preflight {'OK' if ok else 'FAILED'}: {message}")
+                if not ok:
                     rc = 1
-                finally:
-                    await pool.close()
+                if args.sysuser and args.docroot and args.domain:
+                    try:
+                        result = await pool.run(args.sysuser, {"v": 2, "op": "ping", "domain": args.domain, "docroot": args.docroot, "args": {}})
+                        print(f"SSH helper OK: {json.dumps(result)}")
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"SSH helper FAILED [{getattr(exc, 'code', 'error')}]: {exc}")
+                        rc = 1
+            finally:
+                await pool.close()
         finally:
             await plesk.aclose()
             await redis.aclose()
