@@ -9,11 +9,15 @@ RUN pip install --no-cache-dir . && mkdir -p /data && chown 1000:1000 /data
 # Build metadata set by GitHub Actions; shown in /healthz and `pleskmcp check`.
 ARG GIT_SHA=unknown
 ARG APP_VERSION=
+# uid 1000 has no passwd entry in this image: asyncssh needs USER/LOGNAME and a HOME for its config lookup.
 ENV GIT_SHA=$GIT_SHA \
     APP_VERSION=$APP_VERSION \
     DATA_DIR=/data \
     MCP_HOST=0.0.0.0 \
     MCP_PORT=8000 \
+    HOME=/tmp \
+    USER=pleskmcp \
+    LOGNAME=pleskmcp \
     PYTHONUNBUFFERED=1
 
 USER 1000:1000
