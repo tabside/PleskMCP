@@ -95,7 +95,8 @@ class SignupSettings:
     suspend_after_days: int
     delete_after_days: int
     domain_renew_days_before: int
-    delete_backup_mode: str  # manual | none
+    delete_backup_mode: str  # plesk | manual | none
+    backup_timeout: int  # seconds the pleskbackup call may take
     max_attempts: int
     welcome_link_ttl_days: int
     netim_operation_timeout_hours: int
@@ -138,9 +139,9 @@ def load_signup_settings(*, public_base_url: str, plesk_url: str, data_encryptio
     mode = _env("PLESK_LOGIN_LINK_MODE", "session") or "session"
     if mode not in ("session", "reset_page"):
         raise ConfigError("PLESK_LOGIN_LINK_MODE must be session or reset_page")
-    backup_mode = _env("SIGNUP_DELETE_BACKUP_MODE", "manual") or "manual"
-    if backup_mode not in ("manual", "none"):
-        raise ConfigError("SIGNUP_DELETE_BACKUP_MODE must be manual or none")
+    backup_mode = _env("SIGNUP_DELETE_BACKUP_MODE", "plesk") or "plesk"
+    if backup_mode not in ("plesk", "manual", "none"):
+        raise ConfigError("SIGNUP_DELETE_BACKUP_MODE must be plesk, manual or none")
     admin_user = _env("SIGNUP_ADMIN_USER")
     admin_password = _env("SIGNUP_ADMIN_PASSWORD")
     if bool(admin_user) != bool(admin_password):
@@ -210,6 +211,7 @@ def load_signup_settings(*, public_base_url: str, plesk_url: str, data_encryptio
         delete_after_days=_env_int("SIGNUP_DELETE_AFTER_DAYS", 60),
         domain_renew_days_before=_env_int("SIGNUP_DOMAIN_RENEW_DAYS_BEFORE", 30),
         delete_backup_mode=backup_mode,
+        backup_timeout=_env_int("SIGNUP_BACKUP_TIMEOUT", 3600),
         max_attempts=_env_int("SIGNUP_MAX_ATTEMPTS", 5),
         welcome_link_ttl_days=_env_int("SIGNUP_WELCOME_LINK_TTL_DAYS", 7),
         netim_operation_timeout_hours=_env_int("NETIM_OPERATION_TIMEOUT_HOURS", 72),

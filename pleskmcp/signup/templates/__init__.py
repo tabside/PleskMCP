@@ -21,17 +21,17 @@ def _load(name: str) -> str:
 def dns_block(order: "Order", cfg: "SignupSettings") -> str:
     if order.domain_mode == "new":
         lines = [
-            f"   Die Domain {order.domain} wurde für dich registriert und zeigt bereits auf dein Hosting.",
+            f"   Die Domain {order.domain} wurde für Sie registriert und zeigt bereits auf Ihr Hosting.",
             "   Die Registrierung kann einige Stunden dauern, bis sie überall sichtbar ist.",
         ]
         if cfg.nameservers_text:
             lines.append(f"   Nameserver: {cfg.nameservers_text}")
         return "\n".join(lines)
     lines = [
-        f"   Damit {order.domain} auf dein neues Hosting zeigt, stellst du bei deinem Domain-Anbieter eines von beidem ein:",
+        f"   Damit {order.domain} auf Ihr neues Hosting zeigt, stellen Sie bei Ihrem Domain-Anbieter eines von beidem ein:",
         f"   a) Nameserver auf {cfg.nameservers_text or 'die Nameserver des Hostings (siehe Plesk)'} wechseln, oder",
         f"   b) einen A-Record für {order.domain} und www.{order.domain} auf die IP-Adresse {cfg.plesk_ip_address} setzen.",
-        "   Die Umstellung braucht bis zu 24 Stunden. Bis dahin erreichst du dein Hosting über Plesk.",
+        "   Die Umstellung braucht bis zu 24 Stunden. Bis dahin erreichen Sie Ihr Hosting über Plesk.",
     ]
     return "\n".join(lines)
 

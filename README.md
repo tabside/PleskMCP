@@ -139,8 +139,8 @@ Zustände einer Bestellung:
 ```
 awaiting_payment --bezahlt--> activating --ok--> active --Rechnung 10 Tage überfällig--> suspended --bezahlt--> active
                                   |                 |--Abo in reBill deaktiviert, Laufzeit abgelaufen--> suspended
-                                  |                                                                        |--60 Tage--> pending_deletion --Backup bestätigt--> deleted
-                                  |                                                                                        (SIGNUP_DELETE_BACKUP_MODE=none: direkt deleted)
+                                  |                                                                        |--60 Tage--> pending_deletion --Plesk-Backup erstellt--> deleted
+                                  |                                                                                        (manual: Admin bestätigt; none: direkt deleted)
                                   `--Fehler--> awaiting_payment (nächster Versuch)  --SIGNUP_MAX_ATTEMPTS erreicht oder nicht wiederholbar--> needs_attention --Admin "Erneut versuchen"--> vorheriger Status
 ```
 
@@ -156,7 +156,7 @@ awaiting_payment --bezahlt--> activating --ok--> active --Rechnung 10 Tage über
 | `POST /signup` | Bestellung (JSON oder Formular-POST). Schutz: nur HTTPS, Origin-Prüfung, Honeypot-Feld `website` (Antwort sieht wie Erfolg aus, nichts wird angelegt), Token, Limits pro IP (`SIGNUP_RATE_LIMIT_IP`/h) und pro E-Mail (`SIGNUP_RATE_LIMIT_EMAIL`/Tag), Validierung aller Felder serverseitig. Antworten verraten nie, ob eine E-Mail-Adresse schon Kunde ist. |
 | `GET /signup/thanks/{id}` | eingebaute Bestätigungsseite (wenn `SIGNUP_SUCCESS_URL` leer ist) |
 | `GET /signup/welcome/{token}` | Einmal-Link aus der Willkommensmail: erzeugt per XML API `server create_session` einen Session-Token für den Kunden und leitet auf `rsession_init.php` um; danach ist der Link verbraucht. Abgelaufen oder verbraucht: Hinweis auf "Passwort vergessen" (`get_password.php`). `PLESK_LOGIN_LINK_MODE=reset_page` verlinkt stattdessen direkt die Passwort-vergessen-Seite. |
-| `GET /signup/admin` | Übersicht aller Bestellungen (HTTP Basic, `SIGNUP_ADMIN_USER`/`SIGNUP_ADMIN_PASSWORD`): Status, Rechnung, Plesk, Netim, Verlauf; Aktionen "Erneut versuchen", "Jetzt prüfen", "Backup erledigt, löschen" |
+| `GET /signup/admin` | Übersicht aller Bestellungen (HTTP Basic, `SIGNUP_ADMIN_USER`/`SIGNUP_ADMIN_PASSWORD`): Status, Rechnung, Plesk, Netim, Verlauf; Aktionen "Erneut versuchen", "Jetzt prüfen", "Backup erledigt, löschen" (Löschung ohne Warten auf das automatische Backup) |
 
 CLI: `pleskmcp signup-orders [--status S]` listet Bestellungen als JSON-Zeilen (ohne Tokens).
 
@@ -183,12 +183,12 @@ Zahlungsstatus kommt direkt aus bexio (`GET /2.0/kb_invoice/{id}`, `kb_item_stat
 
 * Neueste Rechnung des Abos offen und `SIGNUP_SUSPEND_AFTER_DAYS` (10) Tage nach Fälligkeit: `customer set status 16` (gesperrt durch Administrator), Notiz. Zahlung danach: `status 0`, Notiz.
 * Kündigung: das Abo wird in reBill deaktiviert (`is_active: false`). Der Dienst merkt sich `cancelled_at`, sperrt am Ende der bezahlten Laufzeit (`period_end`) und löscht `SIGNUP_DELETE_AFTER_DAYS` (60) Tage später.
-* Löschung: `SIGNUP_DELETE_BACKUP_MODE=manual` (Standard) setzt `pending_deletion`, schreibt eine Notiz ("Backup erstellen") und wartet auf die Bestätigung in der Admin-Übersicht; `none` löscht direkt. Gelöscht wird `webspace del` plus `customer del`.
+* Löschung: `SIGNUP_DELETE_BACKUP_MODE=plesk` (Standard) setzt `pending_deletion` und erstellt über die Plesk REST API (`POST /api/v2/cli/pleskbackup/call`, Admin-Key als `X-API-Key`) ein vollständiges Backup des Abos im Backup-Manager des Servers (`pleskbackup --domains-name <domain> -prefix pleskmcp -description ...`, Hintergrundtask, `SIGNUP_BACKUP_TIMEOUT` 3600 s); beim nächsten Lauf wird gelöscht. Schlägt das Backup fehl: `needs_attention`, nichts wird gelöscht. `manual` wartet stattdessen auf die Bestätigung in der Admin-Übersicht, `none` löscht direkt. Gelöscht wird `webspace del` plus `customer del`.
 * Schutz gegen Doppelverarbeitung: Redis-Lock `signup:lock:<id>` (10 min) um jede Bestellung, der Scheduler läuft ohnehin nur als Leader.
 
 ### Einrichtung
 
-1. Plesk: eigenen Admin-Secret-Key mit Schreibrechten anlegen (`plesk bin secret_key -c -ip-address <docker host ip> -description "PleskMCP signup"`) als `PLESK_SIGNUP_API_KEY`; der bestehende `PLESK_ADMIN_API_KEY` bleibt lesend. Plan "AI Hosting" muss existieren (`SIGNUP_PLAN_NAME`), `PLESK_SIGNUP_IP` ist die IP, auf der Abos angelegt werden. `ACCESS_PROFILES` braucht einen Eintrag für den Plan, sonst hat der neue Kunde keinen KI-Zugang.
+1. Plesk: eigenen Admin-Secret-Key mit Schreibrechten anlegen (`plesk bin secret_key -c -ip-address <docker host ip> -description "PleskMCP signup"`) als `PLESK_SIGNUP_API_KEY`; er dient der XML API und als `X-API-Key` der REST API (Backup vor der Löschung). Der bestehende `PLESK_ADMIN_API_KEY` bleibt lesend. Plan "AI Hosting" muss existieren (`SIGNUP_PLAN_NAME`), `PLESK_SIGNUP_IP` ist die IP, auf der Abos angelegt werden. `ACCESS_PROFILES` braucht einen Eintrag für den Plan, sonst hat der neue Kunde keinen KI-Zugang.
 2. reBill: Token für die Organisation (Settings → API tokens) als `REBILL_API_TOKEN`, `REBILL_API_URL` = `https://<rebill>/api/v1`. Organisationsdefaults für Steuer, Konto und Einheit setzen; Plan muss `yearly` erlauben.
 3. bexio: API-Token mit Kontakt lesen/schreiben und Rechnungen lesen (`BEXIO_API_TOKEN`), `BEXIO_USER_ID` für neu angelegte Kontakte.
 4. Netim (optional, sonst nur eigene Domains): `NETIM_LOGIN`/`NETIM_SECRET`, Kontakt-IDs Admin/Tech/Billing (isOwner 0), `NETIM_NAMESERVERS`.
@@ -196,6 +196,8 @@ Zahlungsstatus kommt direkt aus bexio (`GET /2.0/kb_invoice/{id}`, `kb_item_stat
 6. SMTP und Absender (`SMTP_*`, `MAIL_FROM`), AGB (`SIGNUP_TERMS_VERSION`, `SIGNUP_TERMS_URL`), Website-Origin (`SIGNUP_ALLOWED_ORIGINS`), Bestätigungsseite (`SIGNUP_SUCCESS_URL`), Admin-Zugang (`SIGNUP_ADMIN_USER`/`-PASSWORD`).
 7. `pleskmcp migrate` (Migration `0002_signup`), Stack neu starten. `/readyz` zeigt `"signup": "enabled"`.
 8. Website: Dateien aus `website/` ins Website-Repo übernehmen (`website/README.md`), `SIGNUP_BASE` in `assets/signup.js` auf die `PUBLIC_BASE_URL` setzen, `assets/domains.json` mit der Preisliste gleich halten.
+
+Passwort-Link: Plesk bietet den Link "Passwort zurücksetzen" nur in der Oberfläche (Kunde → Anmeldedaten ändern) an; weder XML API, REST API noch CLI stellen ihn bereit (geprüft an Plesk 18.0.81: `plesk bin customer`/`user` kennen nur `-passwd`, die REST API hat keinen Endpunkt dafür). Automatisierbar ist der gleichwertige Einmal-Login über `server create_session` (dasselbe wie `plesk login` bzw. `plesk bin admin --get-login-link -user`), den die Willkommensmail verwendet; der Kunde setzt sein Passwort danach im Profil. Alternativ `PLESK_LOGIN_LINK_MODE=reset_page`: Link auf die Seite "Passwort vergessen" von Plesk, die den Reset-Link per Mail verschickt.
 
 Alle Variablen mit Defaults stehen in `.env.example` (Abschnitt Self-Signup). Fehlt bei `SIGNUP_ENABLED=true` eine Pflichtvariable, startet der Dienst nicht und nennt sie.
 

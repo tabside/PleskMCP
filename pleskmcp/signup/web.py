@@ -51,10 +51,10 @@ STATUS_LABELS = {
 _THANKS = """<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex"><title>Bestellung eingegangen</title><style>{style}</style></head>
 <body><div class="card">
-  <h1>Danke für deine Bestellung</h1>
-  <p>Deine Bestellung für <strong>{domain}</strong> ist eingegangen (Bestell-Nr. {order_id}).</p>
-  <p>Die Rechnung kommt in den nächsten Minuten per E-Mail an <strong>{email}</strong>. Du kannst sie mit QR-Rechnung oder Kreditkarte bezahlen.</p>
-  <p>Sobald die Zahlung eingegangen ist, wird dein Hosting automatisch freigeschaltet. Du erhältst dann eine E-Mail mit dem Link zum Setzen deines Passworts und der Anleitung für den KI-Zugang.</p>
+  <h1>Vielen Dank für Ihre Bestellung</h1>
+  <p>Ihre Bestellung für <strong>{domain}</strong> ist eingegangen (Bestell-Nr. {order_id}).</p>
+  <p>Die Rechnung kommt in den nächsten Minuten per E-Mail an <strong>{email}</strong>. Sie können sie mit QR-Rechnung oder Kreditkarte bezahlen.</p>
+  <p>Sobald die Zahlung eingegangen ist, wird Ihr Hosting automatisch freigeschaltet. Sie erhalten dann eine E-Mail mit dem Link zum Setzen Ihres Passworts und der Anleitung für den KI-Zugang.</p>
   <p class="muted">Keine Rechnung erhalten? Bitte auch den Spam-Ordner prüfen oder auf die Rechnungsmail antworten.</p>
 </div></body></html>"""
 
@@ -63,7 +63,7 @@ _WELCOME_EXPIRED = """<!doctype html><html lang="de"><head><meta charset="utf-8"
 <body><div class="card">
   <h1>Dieser Link ist nicht mehr gültig</h1>
   <p>Der Anmeldelink aus der Willkommensmail funktioniert nur einmal und für begrenzte Zeit.</p>
-  <p>Du kannst dir jederzeit ein neues Passwort setzen lassen: <a href="{reset_url}">Passwort vergessen</a> auf der Anmeldeseite von Plesk. Dein Benutzername steht in der Willkommensmail.</p>
+  <p>Sie können sich jederzeit ein neues Passwort setzen lassen: <a href="{reset_url}">Passwort vergessen</a> auf der Anmeldeseite von Plesk. Ihr Benutzername steht in der Willkommensmail.</p>
 </div></body></html>"""
 
 _ADMIN = """<!doctype html><html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -269,7 +269,7 @@ class SignupPages:
         order_id = request.path_params.get("order_id", "")
         order = await self.service.store.get(order_id) if len(order_id) == 16 else None
         if order is None:
-            return HTMLResponse(_THANKS.format(style=STYLE, domain="deine Domain", order_id=html.escape(order_id[:16]), email="deine E-Mail-Adresse"), headers={"Cache-Control": "no-store"})
+            return HTMLResponse(_THANKS.format(style=STYLE, domain="Ihre Domain", order_id=html.escape(order_id[:16]), email="Ihre E-Mail-Adresse"), headers={"Cache-Control": "no-store"})
         return HTMLResponse(_THANKS.format(style=STYLE, domain=html.escape(order.domain), order_id=html.escape(order.id), email=html.escape(order.email)), headers={"Cache-Control": "no-store"})
 
     async def welcome(self, request: Request) -> Response:

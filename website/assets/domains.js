@@ -1,18 +1,16 @@
-/* Domainpreise aus der gemeinsamen Preisliste (assets/domains.json). */
+/* Domainpreise aus der gemeinsamen Preisliste (/assets/domains.json). Die statische Tabelle bleibt als Fallback stehen. */
 (function () {
   "use strict";
   var table = document.getElementById("domains-table");
-  if (!table) return;
+  if (!table || !window.fetch) return;
   fetch("/assets/domains.json").then(function (r) { return r.json(); }).then(function (list) {
-    var cur = list.currency || "CHF";
     var rows = list.tlds.map(function (t) {
-      var price = t.orderable && t.price_per_year != null ? cur + " " + Number(t.price_per_year).toFixed(2) + " pro Jahr" : "auf Anfrage";
-      var note = t.note ? ' <span class="hint">' + t.note + "</span>" : "";
-      var order = t.orderable ? ' <a href="/ki-hosting/bestellen/">online bestellbar</a>' : "";
-      return "<tr><td>." + t.tld + "</td><td>" + price + "</td><td>" + note + order + "</td></tr>";
+      var price = t.price_per_year != null ? "Fr. " + Number(t.price_per_year).toFixed(2) : "auf Anfrage";
+      var extra = t.orderable ? "" : " <span class=\"note2\">(auf Anfrage)</span>";
+      return "<tr><th scope=\"row\">." + t.tld + extra + "</th><td>" + price + "</td></tr>";
     });
     table.querySelector("tbody").innerHTML = rows.join("");
     var stamp = document.getElementById("domains-updated");
-    if (stamp && list.updated) stamp.textContent = "Stand " + list.updated + ", alle Preise inkl. MwSt.";
-  }).catch(function () { table.querySelector("tbody").innerHTML = '<tr><td colspan="3">Die Preisliste konnte nicht geladen werden.</td></tr>'; });
+    if (stamp && list.updated) stamp.textContent = "Preise inkl. MwSt, vorbehaltlich Änderungen. Letzte Anpassung: " + list.updated;
+  }).catch(function () {});
 })();

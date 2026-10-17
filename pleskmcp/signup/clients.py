@@ -307,6 +307,33 @@ class NetimClient:
         return None
 
 
+# -------------------------------------------------------------- Plesk REST API
+class PleskRestClient(_Http):
+    """Plesk REST API (/api/v2) with the administrator secret key as X-API-Key. Used for the CLI gateway only."""
+
+    service = "plesk_rest"
+
+    def __init__(self, base_url: str, api_key: str, *, verify_ssl: bool = True, timeout: float = 3600.0, transport: httpx.AsyncBaseTransport | None = None):
+        self._base = base_url.rstrip("/") + "/api/v2"
+        self._client = httpx.AsyncClient(timeout=timeout, transport=transport, verify=verify_ssl, headers={"X-API-Key": api_key, "Accept": "application/json", "Content-Type": "application/json"}, follow_redirects=False)
+
+    async def cli(self, utility: str, params: list[str], *, env: dict[str, str] | None = None) -> dict[str, Any]:
+        """POST /cli/{utility}/call. Returns {code, stdout, stderr}; a non-zero exit code raises ExternalError (not retryable)."""
+        body: dict[str, Any] = {"params": params, "fail_on_error": False}
+        if env:
+            body["env"] = env
+        data = await self._request("POST", f"/cli/{utility}/call", json_body=body)
+        if not isinstance(data, dict) or "code" not in data:
+            raise ExternalError(self.service, "cli_invalid", _message(data), retryable=False)
+        if int(data.get("code") or 0) != 0:
+            raise ExternalError(self.service, f"cli_exit_{data.get('code')}", str(data.get("stderr") or data.get("stdout") or "")[:300], retryable=False)
+        return data
+
+    async def backup_domain(self, domain: str, *, description: str, prefix: str = "pleskmcp") -> dict[str, Any]:
+        """`plesk bin pleskbackup --domains-name <domain> -prefix <prefix> -description <text>`: full backup into the server repository."""
+        return await self.cli("pleskbackup", ["--domains-name", domain, "-prefix", prefix, "-description", description])
+
+
 # ----------------------------------------------------------------------- Zammad
 class ZammadClient(_Http):
     service = "zammad"

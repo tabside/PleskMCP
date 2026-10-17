@@ -124,7 +124,8 @@ def build_services(
     signup_mailer: Any | None = None,
 ) -> Services:
     store, redis, audit, plesk, accounts, queue, limiter = build_core(settings, store=store, redis=redis, plesk_transport=plesk_transport)
-    signup = build_signup(settings, store, redis, plesk, audit, transports=signup_transports, mailer=signup_mailer)
+    # the signup service talks to the same Plesk server over its REST API; tests route both through the fake
+    signup = build_signup(settings, store, redis, plesk, audit, transports={"plesk_rest": plesk_transport, **(signup_transports or {})}, mailer=signup_mailer)
     provider = PleskAuthProvider(settings, store, audit, cimd_transport=cimd_transport)
 
     auth_settings = AuthSettings(

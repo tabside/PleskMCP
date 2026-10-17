@@ -583,11 +583,37 @@ async def test_cancellation_and_deletion(senv: SignupEnv):
     await senv.service.run_lifecycle()
     o = await status_of(senv, o.id)
     assert o.status == "suspended" and o.suspend_reason == "cancelled" and o.delete_after
-    # 60 days later: manual backup mode -> pending_deletion with a note; nothing deleted yet
+    # 60 days later (default mode plesk): pending_deletion, pleskbackup via the REST CLI gateway, deletion on the next pass
     await senv.service.store.update(o.id, delete_after=int(time.time()) - 1)
     await senv.service.run_lifecycle()
+    await senv.service.wait_for_backups()
     o = await status_of(senv, o.id)
-    assert o.status == "pending_deletion" and "beispiel" in senv.plesk.users and any("Backup" in n for _, n in senv.zammad.notes)
+    assert o.status == "pending_deletion" and "beispiel" in senv.plesk.users and o.backup_done_at and "backup_info" in o.backup_result
+    assert senv.plesk.cli_calls == [{"utility": "pleskbackup", "params": ["--domains-name", "kuendigung.example", "-prefix", "pleskmcp", "-description", f"PleskMCP signup {o.id}: Sicherung vor der Loeschung"], "fail_on_error": False}]
+    assert any("Backup des Abos" in n for _, n in senv.zammad.notes)
+    await senv.service.run_lifecycle()
+    o = await status_of(senv, o.id)
+    assert o.status == "deleted" and "beispiel" not in senv.plesk.users and any("gelöscht" in n for _, n in senv.zammad.notes)
+
+    # a failing backup goes to needs_attention and never deletes
+    o3 = await activate(senv, email="d@example.com", domain_mode="own", domain="backupfehler.example", phone="")
+    await senv.service.store.update(o3.id, status="suspended", suspend_reason="unpaid", suspended_at=int(time.time()) - 100, delete_after=int(time.time()) - 1)
+    senv.bexio.invoices[o3.bexio_invoice_id] = 8
+    senv.plesk.cli_fail = True
+    await senv.service.run_lifecycle()
+    await senv.service.wait_for_backups()
+    o3 = await status_of(senv, o3.id)
+    assert o3.status == "needs_attention" and o3.attention_reason == "backup_failed" and o3.plesk_login in senv.plesk.users
+    senv.plesk.cli_fail = False
+
+    # manual mode: pending_deletion with a note, nothing deleted until the admin confirms
+    senv.service.cfg.__dict__["delete_backup_mode"] = "manual"
+    o = await activate(senv, email="e@example.com", domain_mode="own", domain="manuell.example", phone="")
+    await senv.service.store.update(o.id, status="suspended", suspend_reason="unpaid", suspended_at=int(time.time()) - 100, delete_after=int(time.time()) - 1)
+    senv.bexio.invoices[o.bexio_invoice_id] = 8
+    await senv.service.run_lifecycle()
+    o = await status_of(senv, o.id)
+    assert o.status == "pending_deletion" and o.plesk_login in senv.plesk.users and any("Admin-Übersicht" in n for _, n in senv.zammad.notes)
     # admin confirms -> Plesk subscription and customer gone, status deleted, note
     auth = {"authorization": "Basic " + __import__("base64").b64encode(b"admin:adminpw").decode()}
     page = await senv.client.get("/plesk/signup/admin", headers=auth)
@@ -595,8 +621,8 @@ async def test_cancellation_and_deletion(senv: SignupEnv):
     r = await senv.client.post("/plesk/signup/admin/action", data={"csrf": csrf, "order_id": o.id, "action": "confirm_delete"}, headers=auth)
     assert r.status_code == 200
     o = await status_of(senv, o.id)
-    assert o.status == "deleted" and "beispiel" not in senv.plesk.users and any("gelöscht" in n for _, n in senv.zammad.notes)
-    # automatic mode deletes without confirmation
+    assert o.status == "deleted" and o.plesk_login not in senv.plesk.users
+    # mode none deletes without backup or confirmation
     senv.service.cfg.__dict__["delete_backup_mode"] = "none"
     o2 = await activate(senv, email="c@example.com", domain_mode="own", domain="auto.example", phone="")
     await senv.service.store.update(o2.id, status="suspended", suspend_reason="unpaid", suspended_at=int(time.time()) - 100, delete_after=int(time.time()) - 1)

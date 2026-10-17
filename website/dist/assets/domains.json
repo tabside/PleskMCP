@@ -1,0 +1,197 @@
+{
+  "_comment": "Shared price list: rendered on the website (/domains/) and used by the signup service. Prices in CHF per year incl. VAT as published on the website (last change 05.07.2026). Only entries with orderable=true can be ordered online; the others are shown as 'auf Anfrage'. owner_fields lists the form fields Netim needs for the owner contact of this TLD in addition to name, address and e-mail. Keep website/assets/domains.json identical.",
+  "currency": "CHF",
+  "updated": "2026-07-05",
+  "hosting": {
+    "name": "AI Hosting",
+    "price_per_year": 60.0,
+    "storage_gb": 5,
+    "databases": 0,
+    "features": [
+      "Webspace mit 5 GB Speicher auf einem Plesk-Server in der Schweiz",
+      "KI-Zugang: Claude, ChatGPT und andere MCP-Clients bearbeiten die Website direkt",
+      "Eigene Domain anbinden oder neue Domain gleich mitbestellen",
+      "Jährliche Rechnung per E-Mail mit QR-Rechnung oder Kreditkarte"
+    ]
+  },
+  "tlds": [
+    {
+      "tld": "app",
+      "price_per_year": 22.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ],
+      "note": "nur mit HTTPS erreichbar"
+    },
+    {
+      "tld": "biz",
+      "price_per_year": 22.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "ch",
+      "price_per_year": 13.5,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "click",
+      "price_per_year": 16.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "co",
+      "price_per_year": 37.5,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "com",
+      "price_per_year": 15.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "community",
+      "price_per_year": 43.5,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "de",
+      "price_per_year": 10.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "eu",
+      "price_per_year": 10.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ],
+      "note": "Inhaber mit Wohnsitz oder Sitz in der EU, in Island, Liechtenstein oder Norwegen"
+    },
+    {
+      "tld": "fund",
+      "price_per_year": 66.5,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "global",
+      "price_per_year": 89.5,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "gmbh",
+      "price_per_year": 43.5,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ],
+      "note": "nur für Gesellschaften mit beschränkter Haftung"
+    },
+    {
+      "tld": "id",
+      "price_per_year": 28.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "info",
+      "price_per_year": 27.5,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "io",
+      "price_per_year": 70.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "li",
+      "price_per_year": 13.5,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "net",
+      "price_per_year": 18.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "network",
+      "price_per_year": 34.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "ngo",
+      "price_per_year": 30.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ],
+      "note": "nur für Nichtregierungsorganisationen"
+    },
+    {
+      "tld": "org",
+      "price_per_year": 18.0,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    },
+    {
+      "tld": "swiss",
+      "price_per_year": 120.0,
+      "orderable": false,
+      "note": "auf Anfrage; nur für Unternehmen mit Sitz in der Schweiz"
+    },
+    {
+      "tld": "vision",
+      "price_per_year": 39.5,
+      "orderable": true,
+      "owner_fields": [
+        "phone"
+      ]
+    }
+  ]
+}

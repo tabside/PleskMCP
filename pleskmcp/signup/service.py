@@ -9,6 +9,7 @@ scheduler ticks (or a tick and an admin action) from working on the same order.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import secrets
@@ -23,7 +24,7 @@ from redis.asyncio import Redis
 from ..audit import AuditLog
 from ..config import Settings
 from ..plesk_api import KeyAuth, PleskClient, PleskError, PleskResultError, PleskSystemError
-from .clients import BexioClient, ExternalError, Mailer, NetimClient, RebillClient, ZammadClient
+from .clients import BexioClient, ExternalError, Mailer, NetimClient, PleskRestClient, RebillClient, ZammadClient
 from .config import SignupSettings
 from .forms import OrderInput, ascii_slug
 from .pricelist import PriceList
@@ -101,6 +102,7 @@ class SignupService:
         netim: NetimClient | None,
         zammad: ZammadClient,
         mailer: Mailer,
+        plesk_rest: PleskRestClient,
     ):
         self._settings = settings
         self.cfg = cfg
@@ -114,7 +116,9 @@ class SignupService:
         self.netim = netim
         self.zammad = zammad
         self.mailer = mailer
+        self.plesk_rest = plesk_rest
         self._plesk_auth = KeyAuth(cfg.plesk_api_key)
+        self._backups: dict[str, asyncio.Task[None]] = {}
 
     # ------------------------------------------------------------------ helpers
     @asynccontextmanager
@@ -190,7 +194,7 @@ class SignupService:
                 logger.error("plesk domain check failed: %s", exc)
                 raise OrderRejected("plesk_unavailable", "domain", "Die Prüfung der Domain ist gerade nicht möglich. Bitte in einigen Minuten erneut versuchen.") from exc
             if kind is not None:
-                raise OrderRejected("domain_exists", "domain", "Diese Domain ist auf unserem Server bereits eingerichtet. Bitte melde dich bei uns, falls das deine Domain ist.")
+                raise OrderRejected("domain_exists", "domain", "Diese Domain ist auf unserem Server bereits eingerichtet. Bitte melden Sie sich bei uns, falls das Ihre Domain ist.")
         else:
             try:
                 available, _ = await self.check_domain_available(data.domain)
@@ -645,8 +649,45 @@ class SignupService:
         await self.note(order, f"Abo {order.domain} wieder freigeschaltet: Rechnung {order.last_invoice_id} bezahlt.", subject="Abo freigeschaltet")
         return order
 
+    async def start_backup(self, order: Order) -> None:
+        """SIGNUP_DELETE_BACKUP_MODE=plesk: full backup of the subscription into the Plesk backup repository
+        (REST CLI gateway `pleskbackup --domains-name`), run as a background task so the scheduler loop goes on.
+        The next lifecycle pass deletes once backup_done_at is set."""
+        if order.id in self._backups and not self._backups[order.id].done():
+            return
+        await self.store.update(order.id, backup_started_at=int(time.time()), backup_result=None)
+        await self.event(order.id, "backup_started")
+
+        async def run() -> None:
+            try:
+                result = await asyncio.wait_for(
+                    self.plesk_rest.backup_domain(order.domain, description=f"PleskMCP signup {order.id}: Sicherung vor der Loeschung"),
+                    timeout=self.cfg.backup_timeout,
+                )
+                summary = (str(result.get("stdout") or "").strip().splitlines() or ["ok"])[-1][:128]
+                await self.store.update(order.id, backup_done_at=int(time.time()), backup_result=summary)
+                await self.event(order.id, "backup_done")
+                await self.note(order, f"Backup des Abos {order.domain} im Plesk-Backup-Manager erstellt (pleskbackup, Prefix pleskmcp). Löschung folgt beim nächsten Lauf.")
+            except (ExternalError, asyncio.TimeoutError) as exc:
+                code = getattr(exc, "code", "timeout")
+                await self.store.update(order.id, backup_started_at=None, backup_result=f"failed: {code}"[:128])
+                await self.event(order.id, "backup_failed", error=code)
+                refreshed = (await self.store.get(order.id)) or order
+                await self.needs_attention(refreshed, "backup_failed", f"pleskbackup fuer {order.domain} fehlgeschlagen ({code}). Nach der Behebung 'Erneut versuchen'.")
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("backup task for order %s crashed: %s", order.id, exc)
+
+        task = asyncio.create_task(run())
+        self._backups[order.id] = task
+        task.add_done_callback(lambda t: self._backups.pop(order.id, None))
+
+    async def wait_for_backups(self) -> None:
+        """Tests and shutdown: wait for running backup tasks."""
+        if self._backups:
+            await asyncio.gather(*list(self._backups.values()), return_exceptions=True)
+
     async def delete(self, order: Order, *, confirmed_by: str = "scheduler") -> Order:
-        """Remove subscription and customer in Plesk. With SIGNUP_DELETE_BACKUP_MODE=manual only after confirmation (admin page)."""
+        """Remove subscription and customer in Plesk. Mode plesk: after the backup; manual: after confirmation (admin page); none: directly."""
         if order.plesk_login:
             try:
                 await self._plesk.webspace_del(self._plesk_auth, order.domain)
@@ -690,7 +731,16 @@ class SignupService:
                             await self.store.set_status(order.id, PENDING_DELETION)
                             await self.event(order.id, "pending_deletion")
                             order = (await self.store.get(order.id)) or order
-                            await self.note(order, f"Abo {order.domain} ist seit {self.cfg.delete_after_days} Tagen gesperrt. Bitte Backup erstellen und die Löschung in der Admin-Übersicht bestätigen.", subject="Löschung freigeben")
+                            if self.cfg.delete_backup_mode == "plesk":
+                                await self.note(order, f"Abo {order.domain} ist seit {self.cfg.delete_after_days} Tagen gesperrt. Backup wird erstellt, danach wird gelöscht.", subject="Löschung eingeleitet")
+                                await self.start_backup(order)
+                            else:
+                                await self.note(order, f"Abo {order.domain} ist seit {self.cfg.delete_after_days} Tagen gesperrt. Bitte Backup erstellen und die Löschung in der Admin-Übersicht bestätigen.", subject="Löschung freigeben")
+                elif order.status == PENDING_DELETION and self.cfg.delete_backup_mode == "plesk":
+                    if order.backup_done_at:
+                        order = await self.delete(order, confirmed_by="scheduler after backup")
+                    elif not order.backup_started_at:
+                        await self.start_backup(order)
             except (PleskError, ExternalError) as exc:
                 await self._fail_step(order, "lifecycle", exc)
                 return (await self.store.get(order.id)) or order
@@ -708,7 +758,7 @@ class SignupService:
             target = order.previous_status or AWAITING_PAYMENT
             if target in (ACTIVATING,):
                 target = AWAITING_PAYMENT
-            await self.store.set_status(order.id, target, attempts=0, last_error=None, attention_reason=None)
+            await self.store.set_status(order.id, target, attempts=0, last_error=None, attention_reason=None, backup_started_at=None)
             await self.event(order.id, "admin_retry", status=target)
             return (await self.store.get(order.id)) or order
 

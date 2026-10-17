@@ -107,6 +107,8 @@ class FakePlesk:
         self.created_customers: list[dict[str, Any]] = []  # signup: customer add calls (passwords are not kept)
         self.created_webspaces: list[dict[str, Any]] = []
         self.sessions: list[str] = []
+        self.cli_calls: list[dict[str, Any]] = []  # REST CLI gateway calls (signup backups)
+        self.cli_fail = False
         self.next_customer_id = 900
         self.next_webspace_id = 300
 
@@ -349,7 +351,22 @@ class FakePlesk:
             return self._ok("<webspace><del><result><status>error</status><errcode>1013</errcode><errtext>Webspace does not exist.</errtext></result></del></webspace>")
         return None
 
+    def _handle_rest(self, request: httpx.Request) -> httpx.Response:
+        """Plesk REST API subset: POST /api/v2/cli/{utility}/call with the administrator key."""
+        if self.keys.get(request.headers.get("x-api-key", "")) != "admin":
+            return httpx.Response(401, json={"code": 401, "message": "Unauthorized"})
+        m = re.match(r"^/api/v2/cli/([a-z_]+)/call$", request.url.path)
+        if m and request.method == "POST":
+            body = json.loads(request.content)
+            self.cli_calls.append({"utility": m.group(1), **body})
+            if self.cli_fail:
+                return httpx.Response(200, json={"code": 1, "stdout": "", "stderr": "Unable to create the backup"})
+            return httpx.Response(200, json={"code": 0, "stdout": "The backup has been created: backup_info_2610171530.xml", "stderr": ""})
+        return httpx.Response(404, json={"code": 404, "message": "not found"})
+
     def _handle(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.startswith("/api/v2/"):
+            return self._handle_rest(request)
         login = request.headers.get("HTTP_AUTH_LOGIN")
         password = request.headers.get("HTTP_AUTH_PASSWD")
         key = request.headers.get("KEY")
