@@ -355,17 +355,17 @@ CLI im Container (`docker compose exec api pleskmcp <befehl>`):
 | `generate-key` | Neuen `DATA_ENCRYPTION_KEY` erzeugen. |
 | `check [--sysuser X --domain Y --docroot Z]` | Erreichbarkeit von XML API, Postgres, Redis und (optional) des SSH-Hilfsskripts prüfen. |
 
-Daten: Postgres und Redis in eigenen Volumes, das Audit-Log im Volume `/data` (`audit.log`) und zusätzlich auf stdout.
+Daten: Postgres und Redis in eigenen Volumes, das Audit-Log im Volume `/data` (`audit.log`) und zusätzlich auf stdout. Sicherungen, Papierkorb und Dumps liegen in den Abonnements der Kunden und zählen zu deren Speicherplatz.
 
 ### Wer nutzt den Dienst: `/admin/usage`
 
 `GET <PUBLIC_BASE_URL>/admin/usage` liefert alle bekannten Konten mit Status, Domains, aktiven Verbindungen (OAuth-Client, Token-Familien, letzte Nutzung), Zähler der Tool-Aufrufe (gesamt, 7 und 30 Tage, schreibend) und dem letzten Aufruf. Zähler liegen in Redis (Tageswerte 100 Tage), Verbindungen kommen aus der Token-Tabelle. Keine Pfade, Inhalte oder Tokens in der Antwort.
 
-Freischalten mit `ADMIN_API_TOKEN` (mindestens 24 Zeichen, z.B. `openssl rand -base64 32`); ohne Variable antwortet die Route 404. Zugriff per `Authorization: Bearer <token>` (JSON) oder im Browser per HTTP Basic mit beliebigem Benutzernamen und dem Token als Passwort (HTML-Tabelle; `?format=json` bzw. `?format=html` erzwingt das Format). Fehlversuche sind pro IP limitiert (20 in 5 Minuten) und stehen als `admin_denied` im Audit-Log, jeder Abruf als `admin_usage`.
+Freischalten mit `ADMIN_API_TOKEN` (mindestens 24 Zeichen, z.B. `openssl rand -base64 32`); ohne Variable antwortet die Route 404. Zugriff per `Authorization: Bearer <token>` (JSON) oder im Browser per HTTP Basic mit beliebigem Benutzernamen und dem Token als Passwort (HTML-Tabelle; `?format=json` bzw. `?format=html` erzwingt das Format). Zugriffe sind pro IP limitiert (20 Anfragen in 5 Minuten, Fehlversuche eingeschlossen); abgelehnte Versuche stehen als `admin_denied` im Audit-Log, jeder Abruf als `admin_usage`.
 
 ```
 curl -H "Authorization: Bearer $ADMIN_API_TOKEN" https://mcp.example.com/plesk/admin/usage
-``` Sicherungen, Papierkorb und Dumps liegen in den Abonnements der Kunden und zählen zu deren Speicherplatz.
+```
 
 ### Fehlersuche: Fehlercodes in Tool-Antworten
 
