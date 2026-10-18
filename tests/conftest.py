@@ -43,7 +43,7 @@ PLAN_NAMES = {"guid-plan-ai": "AI Hosting", "guid-plan-standard": "Standard Host
 
 TEST_PROFILES = {
     "AI Hosting": {
-        "scopes": ["files:read", "files:write", "dns:read", "dns:write"],
+        "scopes": ["files:read", "files:write", "dns:read", "dns:write", "ssl:write"],
         "store_max_bytes": 64 * 1024 * 1024,
         "store_max_percent": 10,
         "backup_retention_days": 14,
@@ -739,6 +739,10 @@ def base_env(tmp_path: Path) -> dict[str, str]:
         "HELPER_TIME_LIMIT": "10",
         "JOB_TIME_LIMIT": "20",
         "DB_MANAGEMENT_ENABLED": "true",
+        "SSL_ISSUE_ENABLED": "true",
+        "PLESK_SSL_API_KEY": "admin-key",
+        "SSL_CONTACT_EMAIL": "ssl@example.com",
+        "SSL_EXPECTED_IPS": "192.0.2.1",
         "LOG_FORMAT": "text",
     }
 
@@ -860,7 +864,7 @@ def pkce_pair() -> tuple[str, str]:
     return verifier, challenge
 
 
-ALL_TEST_SCOPES = "files:read files:write dns:read dns:write db:read db:write db:admin"
+ALL_TEST_SCOPES = "files:read files:write dns:read dns:write db:read db:write db:admin ssl:write"
 
 
 class OAuthFlow:

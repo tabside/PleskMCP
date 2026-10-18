@@ -35,6 +35,7 @@ SCOPE_TEXT = {
     "db:read": "Datenbanken der eigenen Webseiten abfragen (Zugangsdaten bleiben verborgen)",
     "db:write": "Daten in eigenen Datenbanken ändern (mit Sicherung)",
     "db:admin": "Eigene Datenbanken anlegen, Schema ändern und wieder löschen (mit Sicherung)",
+    "ssl:write": "Let's-Encrypt-Zertifikate für die eigenen Domains ausstellen",
 }
 
 STYLE = """

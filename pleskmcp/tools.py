@@ -76,6 +76,14 @@ class ToolRunner:
     def audit(self) -> AuditLog:
         return self._audit
 
+    @property
+    def limiter(self) -> RedisLimiter:
+        return self._limiter
+
+    @property
+    def redis(self) -> Redis:
+        return self._redis
+
     # ----------------------------------------------------------------- context
     async def context(self) -> CallContext:
         token = get_access_token()

@@ -50,6 +50,7 @@ from .auth.provider import PleskAuthProvider
 from .auth.ratelimit import RedisLimiter
 from .config import Settings
 from .db import Store, make_engine
+from .certs import CertRunner, register_cert_tools
 from .dbtools import DbRunner, register_db_tools
 from .dns import DnsRunner, register_dns_tools
 from .plesk_api import PleskClient
@@ -66,7 +67,8 @@ INSTRUCTIONS = (
     "des angemeldeten Kunden, für die KI-Zugang gebucht ist. Zuerst list_domains aufrufen, dann mit list_dir/read_file "
     "arbeiten. Pfade sind immer relativ zum Document Root der Domain. Schreibende Tools legen Sicherungen an "
     "(list_versions/restore_version, list_changes), delete_file verschiebt in den Papierkorb. Dauert ein Aufruf "
-    "länger, kommt eine job_id zurück; das Ergebnis liefert job_status."
+    "länger, kommt eine job_id zurück; das Ergebnis liefert job_status. ssl_status zeigt das SSL-Zertifikat einer "
+    "Domain, ssl_issue stellt (falls freigeschaltet) ein Let's-Encrypt-Zertifikat aus."
 )
 
 
@@ -84,10 +86,14 @@ class Services:
     runner: ToolRunner
     mcp: MCPServer
     signup: Any = None  # SignupService or None
+    certs: Any = None  # CertRunner
+
 
     async def close(self) -> None:
         if self.signup is not None:
             await self.signup.aclose()
+        if self.certs is not None:
+            await self.certs.aclose()
         await self.plesk.aclose()
         await self.redis.aclose()
         await self.store.close()
@@ -150,7 +156,9 @@ def build_services(
     register_tools(mcp, runner, settings)
     register_dns_tools(mcp, DnsRunner(runner, plesk))
     register_db_tools(mcp, DbRunner(runner, store, accounts, plesk))
-    return Services(settings, store, redis, audit, plesk, accounts, provider, limiter, queue, runner, mcp, signup)
+    certs = CertRunner(runner, transport=plesk_transport)
+    register_cert_tools(mcp, certs)
+    return Services(settings, store, redis, audit, plesk, accounts, provider, limiter, queue, runner, mcp, signup, certs)
 
 
 async def readiness(services: Services) -> tuple[bool, dict[str, Any]]:
