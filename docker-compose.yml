@@ -93,6 +93,8 @@ x-pleskmcp-env: &pleskmcp-env
   # HTTP
   TRUSTED_PROXIES: ${TRUSTED_PROXIES:-127.0.0.1}
   METRICS_ENABLED: ${METRICS_ENABLED:-true}
+  # Operator report <PUBLIC_BASE_URL>/admin/usage; off when empty
+  ADMIN_API_TOKEN: ${ADMIN_API_TOKEN:-}
   AUDIT_LOG_FILE: ${AUDIT_LOG_FILE:-/data/audit.log}
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   LOG_FORMAT: ${LOG_FORMAT:-json}

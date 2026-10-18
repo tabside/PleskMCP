@@ -341,6 +341,7 @@ def register_cert_tools(mcp: MCPServer, certs: CertRunner) -> None:
             params += ["-d", n]
         params += ["-m", email]
         runner.audit.write("tool_write", login=ctx.login, domain=name, tool="ssl_issue", client=ctx.client_id, names=names)
+        await runner.usage.record(ctx.login, client_id=ctx.client_id, tool="ssl_issue", write=True)
         try:
             await certs.rest().cli("extension", params)
         except ExternalError as exc:

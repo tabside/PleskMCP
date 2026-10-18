@@ -447,6 +447,30 @@ class Store:
             for r in rows
         ]
 
+    async def connections_summary(self) -> dict[str, list[dict[str, Any]]]:
+        """Active connections of every login (client, token families, last use, since), for /admin/usage."""
+        now = int(time.time())
+        async with self._sessions() as session:
+            rows = (
+                await session.execute(
+                    select(
+                        TokenRowModel.plesk_login,
+                        TokenRowModel.client_id,
+                        func.count(func.distinct(TokenRowModel.family_id)).label("families"),
+                        func.max(TokenRowModel.last_used_at).label("last_used"),
+                        func.min(TokenRowModel.created_at).label("since"),
+                    )
+                    .where(TokenRowModel.revoked.is_(False), TokenRowModel.expires_at > now)
+                    .group_by(TokenRowModel.plesk_login, TokenRowModel.client_id)
+                    .order_by(TokenRowModel.plesk_login, func.max(TokenRowModel.last_used_at).desc())
+                )
+            ).all()
+        names = await self.client_names(sorted({r[1] for r in rows}))
+        result: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            result.setdefault(r[0], []).append({"client_id": r[1], "client_name": names.get(r[1]), "families": r[2], "last_used": r[3], "since": r[4]})
+        return result
+
     # ----------------------------------------------------------------- accounts
     async def save_account(
         self,
