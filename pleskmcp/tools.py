@@ -29,6 +29,7 @@ from .config import Settings
 from .plesk_api import DomainInfo
 from .profiles import Profile
 from .queue import HI, JobInfo, JobQueue
+from .usage import UsageTracker
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ class ToolRunner:
         self._limiter = limiter
         self._audit = audit
         self._redis = redis
+        self._usage = UsageTracker(redis)
 
     @property
     def settings(self) -> Settings:
@@ -84,6 +86,10 @@ class ToolRunner:
     def redis(self) -> Redis:
         return self._redis
 
+    @property
+    def usage(self) -> UsageTracker:
+        return self._usage
+
     # ----------------------------------------------------------------- context
     async def context(self) -> CallContext:
         token = get_access_token()
@@ -96,6 +102,7 @@ class ToolRunner:
             account = await self._accounts.get_active_account(login)
         except AccountInactive:
             raise ToolError("Das Plesk-Konto ist nicht mehr aktiv oder der Zugang wurde widerrufen. Bitte neu verbinden.")
+        await self._usage.record(login, client_id=token.client_id)
         return CallContext(login=login, client_id=token.client_id, token_scopes=list(token.scopes), account=account)
 
     async def domain(self, ctx: CallContext, name: str, *, need_scope: str, tool: str) -> DomainContext:
@@ -180,6 +187,7 @@ class ToolRunner:
             fields = {"login": ctx.login, "domain": dom.info.name, "tool": tool, "client": ctx.client_id, "request_id": request["request_id"]}
             fields.update(audit_fields or {"path": args.get("path") or args.get("src"), "dst": args.get("dst")})
             self._audit.write("tool_write", **fields)
+            await self._usage.record(ctx.login, client_id=ctx.client_id, tool=tool, write=True)
         job_id = await self._queue.submit(login=ctx.login, domain=dom.info.name, sysuser=dom.info.sysuser, request=request, write=write, priority=priority, tool=tool)
         info = await self._queue.wait(job_id, self._settings.tool_sync_wait)
         return self._outcome(ctx, dom, tool, write, info, job_id)

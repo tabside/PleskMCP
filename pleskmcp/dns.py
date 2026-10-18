@@ -237,6 +237,7 @@ def register_dns_tools(mcp: MCPServer, dns: DnsRunner) -> None:
         backup = await dns.export_zone(ctx, dom, records, "dns_add_record")
         new_id = await dns.add(dom, auth, rtype, host, val, opt)
         runner.audit.write("dns_add", login=ctx.login, domain=dom.info.name, type=rtype, host=host, record_id=new_id, backup=backup, client=ctx.client_id)
+        await runner.usage.record(ctx.login, client_id=ctx.client_id, tool="dns_add_record", write=True)
         return {"domain": dom.info.name, "id": new_id, "type": rtype, "host": host, "value": val, "opt": opt, "backup": backup}
 
     @mcp.tool(
@@ -254,6 +255,7 @@ def register_dns_tools(mcp: MCPServer, dns: DnsRunner) -> None:
         backup = await dns.export_zone(ctx, dom, records, "dns_delete_record")
         await dns.delete(dom, auth, record.id)
         runner.audit.write("dns_delete", login=ctx.login, domain=dom.info.name, type=record.type, host=record.host, record_id=record.id, backup=backup, client=ctx.client_id)
+        await runner.usage.record(ctx.login, client_id=ctx.client_id, tool="dns_delete_record", write=True)
         return {"domain": dom.info.name, "deleted": dns.present(record, dom.info.name), "backup": backup}
 
     @mcp.tool(
@@ -293,6 +295,7 @@ def register_dns_tools(mcp: MCPServer, dns: DnsRunner) -> None:
                 f"{record.value} opt={record.opt!r}. Bitte mit dns_add_record neu anlegen oder die Zone mit dns_restore_zone zurücksetzen (Export {backup})."
             )
         runner.audit.write("dns_update", login=ctx.login, domain=dom.info.name, type=record.type, host=record.host, record_id=record.id, new_record_id=new_id, backup=backup, client=ctx.client_id)
+        await runner.usage.record(ctx.login, client_id=ctx.client_id, tool="dns_update_record", write=True)
         return {"domain": dom.info.name, "old_id": record.id, "id": new_id, "type": record.type, "host": record.host, "value": val, "opt": opt, "backup": backup}
 
     @mcp.tool(
@@ -351,5 +354,6 @@ def register_dns_tools(mcp: MCPServer, dns: DnsRunner) -> None:
             except ToolError as exc:
                 errors.append(f"add {r.get('type')} {r.get('host')}: {exc}")
         runner.audit.write("dns_restore", login=ctx.login, domain=dom.info.name, export_id=export_id, deleted=deleted, added=added, errors=len(errors), backup=backup, client=ctx.client_id)
+        await runner.usage.record(ctx.login, client_id=ctx.client_id, tool="dns_restore_zone", write=True)
         preview.update({"preview": False, "deleted": deleted, "added": added, "errors": errors, "backup": backup})
         return preview

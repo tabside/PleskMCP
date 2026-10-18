@@ -229,6 +229,9 @@ class Settings:
     ssl_issue_timeout: float = 180.0
     ssl_renew_days: int = 30  # a trusted certificate with more days left is not reissued
 
+    # Operator endpoint <PUBLIC_BASE_URL>/admin/usage (who is connected, last use, call counts); off when empty
+    admin_api_token: str | None = None
+
     @property
     def resource_url(self) -> str:
         return self.public_base_url + "/mcp"
@@ -309,6 +312,9 @@ class Settings:
                 missing.append("DATA_ENCRYPTION_KEY (required for ACCOUNT_CHECK_MODE=customer_key)")
             if missing:
                 raise ConfigError("Missing required environment variables: " + ", ".join(missing))
+            admin_token = _env("ADMIN_API_TOKEN")
+            if admin_token and len(admin_token) < 24:
+                raise ConfigError("ADMIN_API_TOKEN must be at least 24 characters (e.g. `openssl rand -base64 32`)")
 
         parsed = urlparse(public_base_url or "https://localhost")
         if require_runtime:
@@ -405,5 +411,6 @@ class Settings:
             metrics_enabled=_env_bool("METRICS_ENABLED", True),
             service_name=_env("SERVICE_NAME", "Plesk Files MCP") or "Plesk Files MCP",
             signup=signup,
+            admin_api_token=_env("ADMIN_API_TOKEN") or None,
             **_load_ssl_settings(require_runtime=require_runtime, signup=signup),
         )

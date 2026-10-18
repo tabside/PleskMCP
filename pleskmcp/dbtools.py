@@ -275,6 +275,7 @@ def register_db_tools(mcp: MCPServer, db: DbRunner) -> None:
         user = db.db_user_for(name)
         password = db.random_password()
         runner.audit.write("db_create", login=ctx.login, domain=dom.info.name, database=name, client=ctx.client_id)
+        await runner.usage.record(ctx.login, client_id=ctx.client_id, tool="db_create", write=True)
         try:
             db_id = await db._plesk.database_add(auth, dom.info.webspace_id or dom.info.id, name)
         except PleskError as exc:
@@ -341,6 +342,7 @@ def register_db_tools(mcp: MCPServer, db: DbRunner) -> None:
         if "job_id" in dump:
             raise ToolError("Die Sicherung läuft noch; bitte db_drop danach erneut aufrufen.")
         runner.audit.write("db_drop", login=ctx.login, domain=dom.info.name, database=database, dump_id=dump.get("dump_id"), client=ctx.client_id)
+        await runner.usage.record(ctx.login, client_id=ctx.client_id, tool="db_drop", write=True)
         db_id = row.get("plesk_db_id")
         try:
             if db_id is None:

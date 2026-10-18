@@ -11,6 +11,7 @@ Layout for PUBLIC_BASE_URL=https://mcp.example.com/plesk:
     /plesk/account                                  customer self-service page
     /plesk/mcp                                      MCP Streamable HTTP endpoint (bearer token)
     /plesk/healthz  /plesk/readyz  /plesk/metrics   operations
+    /plesk/admin/usage                              operator report: accounts, connections, call counts (ADMIN_API_TOKEN)
     /plesk/signup/...                               self-signup "AI Hosting" (SIGNUP_ENABLED, signup/web.py)
 
 The api never talks to the Plesk server over SSH; tool calls become jobs for
@@ -43,6 +44,7 @@ from mcp.shared.auth import ProtectedResourceMetadata
 
 from . import __version__
 from .accounts import AccountService
+from .admin import AdminPages
 from .audit import AuditLog
 from .auth.account import AccountPages
 from .auth.login import LoginPages
@@ -308,6 +310,12 @@ def build_app(services: Services) -> Starlette:
         @mcp.custom_route("/signup/admin/action", methods=["POST"])
         async def signup_admin_action(request: Request) -> Response:
             return await signup.admin_action(request)
+
+    admin = AdminPages(settings, services.store, services.runner.usage, services.limiter, services.audit)
+
+    @mcp.custom_route("/admin/usage", methods=["GET"])
+    async def admin_usage(request: Request) -> Response:
+        return await admin.usage(request)
 
     @mcp.custom_route("/healthz", methods=["GET"])
     async def healthz(request: Request) -> Response:
