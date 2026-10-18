@@ -17,7 +17,8 @@ profile; with several matches, every value takes the most generous one.
 
 Scopes: files:read, files:write, dns:read, dns:write, db:read (db_list,
 db_schema, db_query), db:write (db_execute, db_restore of table dumps),
-db:admin (db_apply_schema, db_create, db_drop, full-dump restores).
+db:admin (db_apply_schema, db_create, db_drop, full-dump restores),
+ssl:write (ssl_issue: Let's Encrypt for the own domain; ssl_status only needs files:read).
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any
 
-ALL_SCOPES = ["files:read", "files:write", "dns:read", "dns:write", "db:read", "db:write", "db:admin"]
+ALL_SCOPES = ["files:read", "files:write", "dns:read", "dns:write", "db:read", "db:write", "db:admin", "ssl:write"]
 
 _INT_FIELDS = (
     "store_max_percent",

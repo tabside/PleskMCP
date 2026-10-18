@@ -7,11 +7,12 @@ start when a required variable is missing (see `Settings.load`).
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
-VALID_SCOPES = ["files:read", "files:write", "dns:read", "dns:write", "db:read", "db:write", "db:admin"]
+VALID_SCOPES = ["files:read", "files:write", "dns:read", "dns:write", "db:read", "db:write", "db:admin", "ssl:write"]
 ACCOUNT_CHECK_MODES = ("customer_key", "admin_key", "login_only")
 
 
@@ -74,6 +75,30 @@ def _env_list(name: str, default: list[str]) -> list[str]:
     if raw is None:
         return list(default)
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _load_ssl_settings(*, require_runtime: bool, signup: Any) -> dict[str, Any]:
+    enabled = _env_bool("SSL_ISSUE_ENABLED", False)
+    api_key = _env("PLESK_SSL_API_KEY") or (getattr(signup, "plesk_api_key", None) or None)
+    email = _env("SSL_CONTACT_EMAIL")
+    expected = _env_list("SSL_EXPECTED_IPS", [])
+    if not expected and signup is not None and getattr(signup, "plesk_ip_address", None):
+        expected = [signup.plesk_ip_address]
+    if enabled and require_runtime:
+        missing = [name for name, value in (("PLESK_SSL_API_KEY (or PLESK_SIGNUP_API_KEY)", api_key), ("SSL_CONTACT_EMAIL", email)) if not value]
+        if missing:
+            raise ConfigError("SSL_ISSUE_ENABLED=true needs " + ", ".join(missing))
+        if email and not re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email):
+            raise ConfigError("SSL_CONTACT_EMAIL is not an e-mail address")
+    return {
+        "ssl_issue_enabled": enabled,
+        "ssl_api_key": api_key,
+        "ssl_contact_email": email,
+        "ssl_expected_ips": expected,
+        "ssl_issue_cooldown": _env_int("SSL_ISSUE_COOLDOWN", 3600),
+        "ssl_issue_timeout": _env_float("SSL_ISSUE_TIMEOUT", 180),
+        "ssl_renew_days": _env_int("SSL_RENEW_DAYS", 30),
+    }
 
 
 def _load_profiles_env() -> str | None:
@@ -194,6 +219,15 @@ class Settings:
     valid_scopes: list[str] = field(default_factory=lambda: list(VALID_SCOPES))
     # Self-signup "AI Hosting" (SIGNUP_ENABLED=true; see signup/config.py), None when off
     signup: Any = None
+
+    # Let's Encrypt via the Plesk REST CLI gateway (see certs.py); off unless SSL_ISSUE_ENABLED=true
+    ssl_issue_enabled: bool = False
+    ssl_api_key: str | None = None  # administrator secret key, used for the letsencrypt CLI call only
+    ssl_contact_email: str | None = None  # Let's Encrypt account e-mail
+    ssl_expected_ips: list[str] = field(default_factory=list)  # IPs the names must resolve to; empty = no check
+    ssl_issue_cooldown: int = 3600  # seconds between two issue attempts per domain
+    ssl_issue_timeout: float = 180.0
+    ssl_renew_days: int = 30  # a trusted certificate with more days left is not reissued
 
     @property
     def resource_url(self) -> str:
@@ -371,4 +405,5 @@ class Settings:
             metrics_enabled=_env_bool("METRICS_ENABLED", True),
             service_name=_env("SERVICE_NAME", "Plesk Files MCP") or "Plesk Files MCP",
             signup=signup,
+            **_load_ssl_settings(require_runtime=require_runtime, signup=signup),
         )
