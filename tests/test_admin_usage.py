@@ -81,11 +81,16 @@ async def test_admin_usage_auth_and_report(env: Env, flow: OAuthFlow):
 
 async def test_admin_usage_rate_limit(env: Env):
     enable(env)
+    # successful requests never count: a browser may reload the report as often as it likes
+    for _ in range(25):
+        assert (await env.client.get("/plesk/admin/usage", headers={"authorization": f"Bearer {TOKEN}"})).status_code == 200
     for _ in range(20):
         assert (await env.client.get("/plesk/admin/usage", headers={"authorization": "Bearer wrong"})).status_code == 401
-    # the 21st attempt in the window is refused even with the right token
+    # after 20 failures in the window the IP is blocked, even with the right token
     response = await env.client.get("/plesk/admin/usage", headers={"authorization": f"Bearer {TOKEN}"})
-    assert response.status_code == 429 and response.headers["retry-after"] == "300"
+    assert response.status_code == 429 and 0 < int(response.headers["retry-after"]) <= 300
+    # a blocked IP is not counted further and does not hit the audit log as a new denial
+    assert (await env.client.get("/plesk/admin/usage", headers={"authorization": "Bearer wrong"})).status_code == 429
 
 
 def test_admin_token_too_short(tmp_path, monkeypatch: pytest.MonkeyPatch):

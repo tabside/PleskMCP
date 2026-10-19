@@ -35,6 +35,10 @@ return {1, value, ttl}
 """
 
 
+ADMIN_FAIL_LIMIT = 20  # failed authentications per IP at /admin/usage ...
+ADMIN_FAIL_WINDOW = 300  # ... within this many seconds
+
+
 class RateLimited(Exception):
     def __init__(self, scope: str, retry_after: int):
         super().__init__(f"rate limited ({scope}), retry in {retry_after}s")
@@ -85,6 +89,18 @@ class RedisLimiter:
 
     async def record_login_success(self, *, ip: str, login: str) -> None:
         await self._redis.delete(f"rl:login:user:{login.lower()}")
+
+    # ------------------------------------------------------------------- admin
+    async def admin_retry_after(self, ip: str) -> int | None:
+        """Seconds until /admin/usage accepts attempts from this IP again, None when not blocked. Counts nothing."""
+        key = f"rl:admin:fail:{ip}"
+        if await self._peek(key) >= ADMIN_FAIL_LIMIT:
+            return await self._ttl(key)
+        return None
+
+    async def record_admin_failure(self, ip: str) -> None:
+        """Count one failed authentication at /admin/usage; successful requests are never counted."""
+        await self._take(f"rl:admin:fail:{ip}", 0, ADMIN_FAIL_WINDOW)
 
     # ------------------------------------------------------------------- tools
     async def take_tool_call(self, login: str, *, write: bool, write_bytes: int = 0, limits: dict[str, int] | None = None) -> None:

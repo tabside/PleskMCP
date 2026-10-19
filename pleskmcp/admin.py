@@ -6,7 +6,7 @@
 Protected by ADMIN_API_TOKEN, sent either as `Authorization: Bearer <token>`
 (scripts) or as the password of HTTP Basic auth with any user name (browser).
 Without ADMIN_API_TOKEN the route answers 404. Failed attempts are rate
-limited per IP and written to the audit log. The response contains logins,
+limited per IP (successful requests are not counted) and written to the audit log. The response contains logins,
 display names, domain names and client names, but never tokens or secrets.
 """
 
@@ -62,10 +62,6 @@ class AdminPages:
         if not expected or not presented:
             return False
         return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
-
-    async def _limited(self, ip: str, limit: int, window: int) -> bool:
-        allowed, _, _ = await self._limiter._take(f"rl:admin:{ip}", limit, window)  # noqa: SLF001 - same Lua bucket as the login limits
-        return not allowed
 
     @staticmethod
     def _challenge(status: int = 401) -> Response:
@@ -137,9 +133,12 @@ class AdminPages:
         if not self._settings.admin_api_token:
             return JSONResponse({"error": "not_found"}, status_code=404)
         ip = client_ip(request)
-        if await self._limited(f"attempts:{ip}", 20, 300):
-            return JSONResponse({"error": "rate_limited"}, status_code=429, headers={"Retry-After": "300", "Cache-Control": "no-store"})
+        retry_after = await self._limiter.admin_retry_after(ip)
+        if retry_after is not None:
+            return JSONResponse({"error": "rate_limited"}, status_code=429, headers={"Retry-After": str(retry_after), "Cache-Control": "no-store"})
         if not self._authorized(request):
+            # only failures count towards the limit; a browser reloading the report is never locked out
+            await self._limiter.record_admin_failure(ip)
             self._audit.write("admin_denied", ip=ip, endpoint="usage")
             return self._challenge()
         self._audit.write("admin_usage", ip=ip)
