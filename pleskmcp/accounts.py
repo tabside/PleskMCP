@@ -65,6 +65,10 @@ class NoAccess(Exception):
         self.domain = domain
 
 
+class DatabaseListUnavailable(Exception):
+    """Plesk could not be asked which databases a subscription has (no API access in this mode, or an API error)."""
+
+
 @dataclass
 class Account:
     login: str
@@ -353,19 +357,31 @@ class AccountService:
         await cache_set_json(self._redis, cache_key, {"quota_bytes": quota.quota_bytes, "used_bytes": quota.used_bytes, "fetched_at": quota.fetched_at}, self._settings.quota_cache_ttl)
         return quota
 
-    async def databases_for(self, login: str, domain: DomainInfo) -> list[dict[str, Any]]:
+    async def databases_for(self, login: str, domain: DomainInfo, *, refresh: bool = False, strict: bool = False) -> list[dict[str, Any]]:
+        """Databases Plesk lists for the subscription of a domain, cached for PLAN_CACHE_TTL.
+
+        refresh=True bypasses the cache (used before a database is refused as
+        foreign, so a database created in the panel a moment ago is accepted).
+        strict=True raises DatabaseListUnavailable instead of returning [] when
+        Plesk cannot be asked; failures are never cached.
+        """
         auth = await self.api_auth_for(login)
         if auth is None:
+            if strict:
+                raise DatabaseListUnavailable("no Plesk API access in this mode")
             return []
         cache_key = f"dbs:{login}:{domain.webspace}"
-        cached = await cache_get_json(self._redis, cache_key)
-        if cached is not None:
-            return list(cached)
+        if not refresh:
+            cached = await cache_get_json(self._redis, cache_key)
+            if cached is not None:
+                return list(cached)
         try:
             databases = await self._plesk.get_databases(auth, domain.webspace)
         except PleskError as exc:
             logger.warning("database listing failed for %s/%s: %s", login, domain.webspace, exc)
-            databases = []
+            if strict:
+                raise DatabaseListUnavailable(str(exc)) from exc
+            return []
         await cache_set_json(self._redis, cache_key, databases, self._settings.plan_cache_ttl)
         return databases
 

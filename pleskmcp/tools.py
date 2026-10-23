@@ -229,8 +229,9 @@ class ToolRunner:
         if code == "worker_lost":
             return f"Der Auftrag wurde unterbrochen und mehrfach wiederholt, ohne Ergebnis. Bitte erneut versuchen. [{code}]"
         if code == "internal":
-            kind = details.get("error")
-            return f"Interner Fehler im Dateidienst{f' ({kind})' if kind else ''}. {operator} [{code}]"
+            # the exception type and message stay in the worker log; the client only gets the job id to quote
+            job = details.get("job_id")
+            return f"Interner Fehler im Dateidienst{f' (Auftrag {job})' if job else ''}. {operator} [{code}]"
         if code == "quota_exceeded":
             usage = details.get("usage_bytes")
             limit = details.get("limit_bytes")

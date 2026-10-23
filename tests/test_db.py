@@ -100,11 +100,88 @@ async def test_query_schema_redaction_and_readonly(env: Env, flow: OAuthFlow):
     # unknown credentials -> clear hint to the account page
     result = await call_tool(env.client, access, "db_query", {"domain": "data.example", "database": "legacy_db", "sql": "SELECT 1"})
     assert result["isError"] and "db_no_credentials" in tool_text(result)
-    # a database of another subscription is unknown here: the helper never sees stored credentials for it
+    # a database of another subscription of the same customer is refused by the service before any job runs
     result = await call_tool(env.client, access, "db_query", {"domain": "data.example", "database": "wp_db", "sql": "SELECT 1"})
-    assert result["isError"]
+    assert result["isError"] and "gehört nicht zum Abo data.example" in tool_text(result)
     many = structured(await call_tool(env.client, access, "db_query", {"domain": "data.example", "database": "app_db", "sql": "SELECT id FROM users"}))
     assert many["truncated"] is False
+
+
+async def test_foreign_database_refused_server_side(env: Env, flow: OAuthFlow):
+    """The database -> subscription check does not rely on MySQL grants or on the account page.
+
+    Even with stored credentials for a database of another customer (the UI
+    check bypassed) every database tool refuses it; own databases work, a
+    database created in the panel a moment ago is picked up despite the cache.
+    """
+    access = await login(flow)
+    env.plesk.add_database(env.plesk.webspace_id("other.example"), "other_db")
+    env.mysql.add("other_db", "other_user", "other-pw")
+    conn = env.mysql.connect("other_db")
+    conn.executescript("CREATE TABLE secrets (id INTEGER PRIMARY KEY, v TEXT); INSERT INTO secrets VALUES (1, 'other customer data');")
+    conn.close()
+    await env.services.store.save_db_credential("kunde", "other_db", "other_user", env.services.accounts.encrypt("other-pw"), source="stored")
+    jobs_before = len(env.pool.calls)
+    for tool, extra in [
+        ("db_schema", {}),
+        ("db_query", {"sql": "SELECT * FROM secrets"}),
+        ("db_execute", {"sql": "DELETE FROM secrets WHERE id=1", "confirm": True}),
+        ("db_apply_schema", {"sql": "ALTER TABLE secrets ADD COLUMN x INT", "confirm": True}),
+        ("db_restore", {}),
+    ]:
+        result = await call_tool(env.client, access, tool, {"domain": "data.example", "database": "other_db", **extra})
+        text = tool_text(result)
+        assert result["isError"] and "gehört nicht zum Abo data.example" in text, tool
+        assert "other customer data" not in text
+    assert len(env.pool.calls) == jobs_before  # nothing reached the helper
+    conn = env.mysql.connect("other_db")
+    assert conn.execute("SELECT COUNT(*) FROM secrets").fetchone()[0] == 1
+    conn.close()
+    audit = open(env.settings.audit_log_file, encoding="utf-8").read()
+    assert '"event": "db_foreign_refused"' in audit and '"database": "other_db"' in audit
+    # own databases of the subscription keep working
+    rows = structured(await call_tool(env.client, access, "db_query", {"domain": "data.example", "database": "app_db", "sql": "SELECT COUNT(*) AS n FROM posts"}))
+    assert rows["rows"][0] == ["2"]
+    # a database added in the panel after the list was cached is accepted (cache is re-read once before refusing)
+    env.plesk.add_database(env.plesk.webspace_id("data.example"), "fresh_db")
+    env.mysql.add("fresh_db", "fresh_user", "fresh-pw")
+    await env.services.store.save_db_credential("kunde", "fresh_db", "fresh_user", env.services.accounts.encrypt("fresh-pw"), source="stored")
+    schema = structured(await call_tool(env.client, access, "db_schema", {"domain": "data.example", "database": "fresh_db"}))
+    assert schema["tables"] == []
+    # a name Plesk does not know at all
+    result = await call_tool(env.client, access, "db_query", {"domain": "data.example", "database": "nothere", "sql": "SELECT 1"})
+    assert result["isError"] and "gehört nicht zum Abo" in tool_text(result)
+
+
+async def test_db_tools_unavailable_in_login_only_mode(env: Env, flow: OAuthFlow):
+    """Without Plesk API access the ownership check cannot run: the database tools are off, not open."""
+    access = await login(flow)
+    # give the plan itself (not only the add-on, which login_only cannot see) the db scopes, so the profile check passes
+    profiles = {**env.settings.profiles, "guid-plan-standard": env.settings.profiles["ki-zugang"]}
+    settings = env.settings.__class__(**{**env.settings.__dict__, "account_check_mode": "login_only", "profiles": profiles})
+    env.services.accounts._settings = settings
+    env.services.runner._settings = settings
+    await env.services.accounts.invalidate_caches("kunde")
+    result = await call_tool(env.client, access, "db_query", {"domain": "data.example", "database": "app_db", "sql": "SELECT 1"})
+    assert result["isError"] and "login_only" in tool_text(result)
+
+
+async def test_db_tools_fail_closed_when_plesk_listing_fails(env: Env, flow: OAuthFlow, monkeypatch):
+    from pleskmcp.plesk_api import PleskError
+
+    access = await login(flow)
+    await env.services.accounts.forget_databases("kunde", "data.example")
+
+    async def broken(auth, webspace_name):
+        raise PleskError("agent.php unreachable")
+
+    monkeypatch.setattr(env.services.plesk, "get_databases", broken)
+    result = await call_tool(env.client, access, "db_query", {"domain": "data.example", "database": "app_db", "sql": "SELECT 1"})
+    assert result["isError"] and "nicht abgefragt" in tool_text(result)
+    # the failure is not cached: once Plesk answers again, the query runs
+    monkeypatch.undo()
+    rows = structured(await call_tool(env.client, access, "db_query", {"domain": "data.example", "database": "app_db", "sql": "SELECT COUNT(*) AS n FROM posts"}))
+    assert rows["rows"][0] == ["2"]
 
 
 async def test_execute_preview_confirm_and_restore(env: Env, flow: OAuthFlow):

@@ -7,12 +7,13 @@ passed per call and never stored by this module.
 from __future__ import annotations
 
 import logging
-import xml.etree.ElementTree as ET
+import xml.etree.ElementTree as ET  # element type and ParseError only; parsing goes through defusedxml
 from dataclasses import dataclass, field
 from typing import Any
 from xml.sax.saxutils import escape
 
 import httpx
+from defusedxml.ElementTree import fromstring as safe_fromstring  # no entity expansion, no DTD, no external entities
 
 logger = logging.getLogger(__name__)
 
@@ -180,8 +181,8 @@ class PleskClient:
         if response.status_code != 200:
             raise PleskError(f"Plesk API returned HTTP {response.status_code}")
         try:
-            root = ET.fromstring(response.content)
-        except ET.ParseError as exc:
+            root = safe_fromstring(response.content)
+        except (ET.ParseError, ValueError) as exc:  # defusedxml raises its ValueError subclasses for forbidden constructs
             raise PleskError("Plesk API returned invalid XML") from exc
         system = root.find("system")
         if system is not None and _text(system.find("status")) == "error":

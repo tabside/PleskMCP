@@ -9,7 +9,7 @@ Dieses Repo ist öffentlich. Code, README, Tests und Beispiele enthalten keine e
 ## Sicherheitsmodell in Kürze
 
 - **Kein Root.** Der Dienst hat weder Root-SSH noch das Root-Passwort noch den Plesk-DB-Admin-Zugang. Auf dem Plesk-Server gibt es einen eigenen, unprivilegierten SSH-Benutzer `pleskmcp` mit Key, dessen Key per `authorized_keys` auf ein Forced Command festgenagelt ist und der per sudoers genau einen Befehl ausführen darf: das Hilfsskript, und zwar nur als Mitglied der Plesk-Gruppe `psacln` (die Systembenutzer der Abonnements). root ist nicht in dieser Gruppe.
-- **Datei- und Datenbankoperationen laufen unter dem Systembenutzer des Kunden.** Die Trennung zwischen Kunden übernimmt das Betriebssystem, neue Dateien gehören automatisch dem Kunden. Datenbankabfragen laufen lokal auf dem Plesk-Server mit dem Datenbankbenutzer des Kunden, nie mit Admin-Rechten.
+- **Datei- und Datenbankoperationen laufen unter dem Systembenutzer des Kunden.** Die Trennung zwischen Kunden übernimmt das Betriebssystem, neue Dateien gehören automatisch dem Kunden. Datenbankabfragen laufen lokal auf dem Plesk-Server mit dem Datenbankbenutzer des Kunden, nie mit Admin-Rechten. Zusätzlich prüft der Dienst vor jedem Datenbank-Tool selbst, dass die angefragte Datenbank laut Plesk zum Abo der Domain gehört (oder vom Dienst für dieses Abo angelegt wurde); fremde Datenbanken werden abgelehnt, bevor ein Auftrag läuft, unabhängig von den Grants des Datenbankbenutzers.
 - **Kein Plesk-Admin-Schreibzugriff für Kundenaktionen.** Die XML API wird im Kontext des Kunden benutzt (eigener Secret-Key pro Kunde). Ein optionaler Admin-Key dient ausschliesslich lesend (Kontostatus im Modus `admin_key`, Auflösung von Plan-Namen). Einzige Ausnahme: `ssl_issue` (nur mit `SSL_ISSUE_ENABLED=true`), weil Plesk für Let's Encrypt keine Schnittstelle im Kundenkontext hat. Der dafür nötige Admin-Key (`PLESK_SSL_API_KEY`) wird ausschliesslich für den einen CLI-Aufruf `extension --exec letsencrypt cli.php` benutzt; Domainnamen und Parameter bildet der Dienst selbst aus der geprüften Domain des Kunden, der Client liefert nur den Domainnamen.
 - **Zuordnung serverseitig.** Login → Abonnements → Domains → Systembenutzer → Document Root wird read-only aus der Plesk XML API ermittelt. Der Client übergibt nur Domainname und relativen Pfad. Die Domain wird gegen die Liste des angemeldeten Kunden und gegen das Profil des Abos geprüft, bevor irgendetwas ausgeführt wird.
 - **Pfade werden im Hilfsskript abgesichert:** normalisiert, auf den Document Root begrenzt, jede Komponente per `lstat` geprüft, Symlinks werden abgelehnt, Ziel ausserhalb wird abgelehnt. Keine Shell-Strings, alle Parameter gehen als JSON über stdin.
@@ -69,6 +69,8 @@ Felder: `scopes` (`files:read`, `files:write`, `dns:read`, `dns:write`, `db:read
 
 Der Token behält die beim Login erteilten Scopes; die effektiven Rechte sind die Schnittmenge aus Token-Scopes und Profil des Abos. Eine Verbindung mit `db:read` im Token darf auf einem "AI Hosting"-Abo trotzdem keine Datenbank lesen.
 
+**Wildcard `"*"`.** Ein Profil mit dem Schlüssel `"*"` gilt als Rückfall für jedes Abo eines angemeldeten Kunden, dessen Plan und Add-ons auf kein anderes Profil passen, also für alle Abos, unabhängig vom gebuchten Plan. Das ist für Installationen gedacht, bei denen jeder Kunde Zugang haben soll; in einem gemischten Hosting ist es ein Fuss-Schuss. Jeder Prozess (api, worker, scheduler) warnt beim Start im Log, wenn `"*"` gesetzt ist.
+
 **Plan-Namen oder GUIDs.** Die XML API zeigt einem Kunden für sein Abo nur die GUIDs von Plan und Add-ons (`webspace get`, Dataset `subscriptions`); `service-plan get` und `service-plan-addon get` liefern Kunden `1006`. Namen kann der Dienst nur mit `PLESK_ADMIN_API_KEY` auflösen (lesend, gecacht). Ohne Admin-Key müssen die Schlüssel in `ACCESS_PROFILES` die GUIDs sein (`plesk bin service_plan --list` bzw. `service_plan_addon --list` zeigen sie). Beides darf gemischt werden.
 
 ## Was Kunden selbst rückgängig machen
@@ -99,7 +101,7 @@ Sicherungen und Papierkorb zählen zum Speicherplatz des Kunden. Damit sie das K
 
 ## Datenbanken
 
-Nur für Profile mit db-Scopes. Abfragen laufen über das `mysql`-CLI auf dem Plesk-Server (MariaDB), als Systembenutzer des Abos, mit `--defaults-extra-file` (temporäre Datei 0600 im Store, sofort gelöscht), Host nur `localhost`, Zeitlimit (`max_statement_time` bzw. `MAX_EXECUTION_TIME`, `DB_QUERY_TIME_LIMIT`) und Zeilenlimit (`DB_MAX_ROWS`). Nutzbar sind nur Datenbanken, die die XML API dem Kunden als eigene zeigt (`database get-db`) oder deren Zugangsdaten auf dem Server in der Konfiguration der Seite stehen.
+Nur für Profile mit db-Scopes. Abfragen laufen über das `mysql`-CLI auf dem Plesk-Server (MariaDB), als Systembenutzer des Abos, mit `--defaults-extra-file` (temporäre Datei 0600 im Store, sofort gelöscht), Host nur `localhost`, Zeitlimit (`max_statement_time` bzw. `MAX_EXECUTION_TIME`, `DB_QUERY_TIME_LIMIT`) und Zeilenlimit (`DB_MAX_ROWS`). Nutzbar sind nur Datenbanken, die die XML API für das Abo der Domain listet (`database get-db`, gecacht für `PLAN_CACHE_TTL`, vor einer Ablehnung einmal frisch gelesen) oder die der Dienst mit `db_create` für dieses Abo angelegt hat. Jedes Datenbank-Tool prüft das serverseitig, bevor der Auftrag an den Plesk-Server geht; eine andere Datenbank (auch eine eines anderen Abos desselben Kunden, auch mit hinterlegten Zugangsdaten) wird mit "gehört nicht zum Abo" abgelehnt und als `db_foreign_refused` im Audit-Log vermerkt. Kann Plesk nicht gefragt werden (API-Fehler oder `ACCOUNT_CHECK_MODE=login_only`), sind die Datenbank-Tools nicht verfügbar statt offen. Trotzdem gilt: pro Abo eigene Datenbankbenutzer mit minimalen Grants verwenden; die Prüfung im Dienst ist die zweite Schicht, nicht der Ersatz dafür.
 
 **Zugangsdaten**, in dieser Reihenfolge: (1) vom Dienst angelegte Datenbanken (`db_create`), (2) aus der Konfiguration der Seite, vom Hilfsskript direkt auf dem Server gelesen (`wp-config.php`, `.env` mit `DB_*`, `configuration.php`, `app/etc/env.php`, `config/database.php`; `DB_CONFIG_SOURCES`), (3) vom Kunden auf der `/account`-Seite pro Datenbank hinterlegt (verschlüsselt in Postgres, nur an den Job übergeben, nie angezeigt). Job-Anfragen in Redis tragen diese Werte nur bis zum Abschluss des Jobs; mit dem Ergebnis wird die Anfrage gelöscht.
 
@@ -269,6 +271,8 @@ Hinweise:
 
 Das Image wird bei jedem Push auf `main` von GitHub Actions gebaut und nach `ghcr.io/tabside/pleskmcp:latest` veröffentlicht (`.github/workflows/docker-publish.yml`; Tests, Lint, Helper-Syntaxprüfung und ein Smoke-Test der drei Startbefehle laufen vorher). Ist das GHCR-Package privat, braucht Portainer unter Registries einen `ghcr.io`-Eintrag mit einem GitHub-Token (Scope `read:packages`).
 
+Das Basis-Image ist im `Dockerfile` per Tag und Digest festgenagelt, die Python-Abhängigkeiten über `constraints.txt` (pip-Constraints, exakte Versionen). Beides bewusst von Hand anheben: Tag und Digest zusammen ändern (`docker buildx imagetools inspect python:3.12-slim` zeigt den aktuellen Digest), `constraints.txt` nach dem Rezept im Dateikopf neu erzeugen und die Tests laufen lassen.
+
 1. In Portainer einen Stack aus `docker-compose.yml` anlegen, Umgebungsvariablen aus `.env.example` setzen. Pflicht: `PUBLIC_BASE_URL`, `PLESK_URL`, `PLESK_SSH_HOST`, `PLESK_SSH_USER`, `PLESK_SSH_KEY_PATH` (Secret), `PLESK_SSH_HOST_KEY` oder `PLESK_SSH_KNOWN_HOSTS`, `POSTGRES_PASSWORD`, `REDIS_PASSWORD`, `DATA_ENCRYPTION_KEY`, `ACCESS_PROFILES`. Fehlt eine Pflichtvariable, startet der Container nicht und nennt sie im Log.
 2. `DATA_ENCRYPTION_KEY` erzeugen: `docker run --rm ghcr.io/tabside/pleskmcp pleskmcp generate-key`. Passwörter: `openssl rand -hex 24`.
 3. Den privaten SSH-Key als Docker-Secret bereitstellen (Compose: `secrets.pleskmcp_ssh_key.file`).
@@ -330,7 +334,7 @@ curl -s https://mcp.example.com/plesk/readyz    # {"status":"ok","checks":{"data
 |---|---|---|
 | `customer_key` (Standard) | Beim Login legt der Dienst mit den Kundendaten einen Plesk-Secret-Key für diesen Kunden an und speichert ihn verschlüsselt (Fernet). Statusprüfung, Domainliste, DNS und Datenbankverwaltung laufen damit im Kontext des Kunden. Kein Admin-Zugang im Dienst. | `DATA_ENCRYPTION_KEY`; Kunden müssen `secret_key create` aufrufen dürfen (sonst Login mit 503 und klarem Hinweis im Log). |
 | `admin_key` | Ein Admin-Secret-Key (`plesk bin secret_key -c -ip-address <docker-host-ip>`) liest Kundenstatus und Webspaces. Der Code nutzt ihn ausschliesslich lesend; `db_create`/`db_drop` sind in diesem Modus nicht verfügbar. | `PLESK_ADMIN_API_KEY` |
-| `login_only` | Keine Prüfung nach dem Login. Die Domainliste vom Login bleibt bis zum nächsten Login, Tokens laufen normal ab. DNS- und Datenbank-Tools nicht verfügbar. | nichts |
+| `login_only` | **Unsicherer Modus, nur wenn Plesk-Statusabfragen nicht möglich sind.** Keine Prüfung nach dem Login: ein in Plesk inzwischen gesperrtes oder gelöschtes Konto bzw. ein gesperrtes Abo behält Dateizugriff, bis die Tokens ablaufen (Access-Token `ACCESS_TOKEN_TTL`, Refresh bis `REFRESH_TOKEN_TTL`; beide dann kurz setzen). Die Domainliste vom Login bleibt bis zum nächsten Login. DNS- und Datenbank-Tools sind nicht verfügbar (hart abgelehnt). Jeder Prozess warnt beim Start im Log. | nichts |
 
 Unabhängig vom Modus wird das Passwort immer nur gegen die XML API geprüft und nie gespeichert.
 
@@ -380,10 +384,10 @@ Jede Fehlermeldung an den Client endet mit einem Code in eckigen Klammern. Detai
 | `helper_crash` | Das Hilfsskript hat kein gültiges JSON geliefert (veraltete Version, Absturz). | `git pull` und `install.sh` auf dem Plesk-Server; Traceback im Worker-Log. |
 | `helper_timeout` / `timeout` | Zeitlimit des Aufrufs bzw. des Hilfsskripts überschritten. | Bei grossen Logs oder Verzeichnissen: Hintergrundjob abwarten (`job_status`), Limits prüfen. |
 | `worker_lost` | Der Job wurde zweimal von einem verschwundenen Worker zurückgestellt. | Worker-Container prüfen (Healthcheck, Neustarts). |
-| `internal` | Unerwartete Ausnahme im Worker; die Antwort nennt den Ausnahmetyp in Klammern. | Traceback im Worker-Log, Fehler bitte melden. |
+| `internal` | Unerwartete Ausnahme im Worker; die Antwort nennt nur die Job-ID in Klammern (kein Ausnahmetyp, kein Text). | Traceback im Worker-Log (`job <id>` suchen), Fehler bitte melden. |
 | `not_owner`, `quota_exceeded`, `not_found`, `protected`, ... | Fachliche Fehler des Hilfsskripts, Meldung an den Kunden ist selbsterklärend. | |
 
-`/readyz` liefert zusätzlich `ssh_preflight` (`ok`, `failed`, `unknown`): jeder Worker prüft beim Start Schlüsseldatei und Host-Key und hinterlegt das Ergebnis in Redis.
+`/readyz` liefert zusätzlich `ssh_preflight` (`ok`, `failed`, `unknown`): jeder Worker prüft beim Start Schlüsseldatei und Host-Key und hinterlegt das Ergebnis in Redis. Die Fehlermeldungen dazu (`ssh_preflight_errors`) gibt `/readyz` nur an den Betreiber aus: bei Aufrufen von localhost (z.B. `docker compose exec api python -c ...` oder vom Docker-Host über das Port-Mapping) oder mit `Authorization: Bearer $ADMIN_API_TOKEN`; von aussen fehlt das Feld (Anfragen über den Reverse-Proxy zählen wegen `X-Forwarded-For`/`TRUSTED_PROXIES` als extern, der Proxy muss den Header also setzen wie im Beispiel oben). `/metrics` weiterhin am Proxy nicht öffentlich durchreichen (oder `METRICS_ENABLED=false`).
 
 ### Umgebungsvariablen mit Defaults
 

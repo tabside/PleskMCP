@@ -1,10 +1,12 @@
-FROM python:3.12-slim
+# python:3.12.15-slim, pinned by digest (reproducible builds; bump tag and digest together)
+FROM python:3.12.15-slim@sha256:a0f57064cbdcd6285fa45f51237ab0b35ea8ebaed06a1f5973e89e19dfb86704
 
 WORKDIR /app
 
-COPY pyproject.toml README.md alembic.ini ./
+COPY pyproject.toml README.md alembic.ini constraints.txt ./
 COPY pleskmcp ./pleskmcp
-RUN pip install --no-cache-dir . && mkdir -p /data && chown 1000:1000 /data
+# constraints.txt pins every dependency to the versions the image was tested with
+RUN pip install --no-cache-dir -c constraints.txt . && mkdir -p /data && chown 1000:1000 /data
 
 # Build metadata set by GitHub Actions; shown in /healthz and `pleskmcp check`.
 ARG GIT_SHA=unknown

@@ -61,7 +61,7 @@ jobs:
         id: version
         run: |
           base=$(sed -n 's/^_VERSION_BASE = "\(.*\)"$/\1/p' pleskmcp/__init__.py)
-          count=$(git rev-list --count HEAD -- pleskmcp helper Dockerfile pyproject.toml)
+          count=$(git rev-list --count HEAD -- pleskmcp helper Dockerfile pyproject.toml constraints.txt)
           test -n "$base" && test -n "$count"
           echo "version=${base}.${count}" >> "$GITHUB_OUTPUT"
 

@@ -23,7 +23,7 @@ from typing import Any
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from .accounts import AccountService
+from .accounts import AccountService, DatabaseListUnavailable
 from .db import Store
 from .plesk_api import PleskClient, PleskError, PleskResultError
 from .tools import DESTRUCTIVE, READ_ONLY, WRITE, CallContext, DomainContext, ToolRunner
@@ -74,15 +74,43 @@ class DbRunner:
                 created.append(row["database"])
         return creds, created
 
-    async def db_args(self, ctx: CallContext, database: str, extra: dict[str, Any]) -> dict[str, Any]:
+    async def db_args(self, ctx: CallContext, dom: DomainContext, database: str, extra: dict[str, Any]) -> dict[str, Any]:
         if not DB_NAME_RE.match(database or ""):
             raise ToolError("Ungültiger Datenbankname.")
+        await self.ensure_subscription_database(ctx, dom, database)
         args: dict[str, Any] = {"database": database}
         args.update(extra)
         stored = await self.stored_credentials(ctx.login, database)
         if stored is not None:
             args["credentials"] = stored
         return args
+
+    async def ensure_subscription_database(self, ctx: CallContext, dom: DomainContext, database: str) -> None:
+        """Hard server-side check that the database belongs to the subscription of the domain.
+
+        Accepted are the databases Plesk lists for the subscription (cached for
+        PLAN_CACHE_TTL, re-read once before refusing) and the ones the service
+        created for this subscription. Everything else is refused here, so the
+        isolation does not depend on the MySQL grants of the customer's database
+        user alone. Without Plesk API access (ACCOUNT_CHECK_MODE=login_only) the
+        database tools are unavailable.
+        """
+        try:
+            names = {d.get("name") for d in await self._accounts.databases_for(ctx.login, dom.info, strict=True)}
+            if database not in names:
+                names = {d.get("name") for d in await self._accounts.databases_for(ctx.login, dom.info, refresh=True, strict=True)}
+        except DatabaseListUnavailable as exc:
+            if await self._accounts.api_auth_for(ctx.login) is None:
+                raise ToolError("Datenbank-Tools sind in diesem Betriebsmodus nicht verfügbar (ACCOUNT_CHECK_MODE=login_only).")
+            logger.warning("database ownership check for %s/%s failed: %s", ctx.login, dom.info.webspace, exc)
+            raise ToolError("Die Datenbanken des Abos konnten in Plesk nicht abgefragt werden; bitte später erneut versuchen.")
+        if database in names:
+            return
+        row = await self.service_row(ctx.login, database)
+        if row is not None and row.get("webspace") == dom.info.webspace:
+            return
+        self._runner.audit.write("db_foreign_refused", login=ctx.login, domain=dom.info.name, database=database, client=ctx.client_id)
+        raise ToolError(f"Die Datenbank {database} gehört nicht zum Abo {dom.info.webspace} (laut Plesk). Nur Datenbanken dieses Abos sind erreichbar; db_list zeigt sie.")
 
     async def known_database(self, ctx: CallContext, dom: DomainContext, database: str) -> dict[str, Any] | None:
         """The Plesk record of a database if the XML API lists it for the subscription."""
@@ -177,7 +205,7 @@ def register_db_tools(mcp: MCPServer, db: DbRunner) -> None:
     @mcp.tool(description="Tabellen einer Datenbank (ohne table) oder Spalten einer Tabelle (mit table).", annotations=READ_ONLY)
     async def db_schema(domain: str, database: str, table: str | None = None) -> dict[str, Any]:
         ctx, dom = await db.prepare(domain, scope="db:read", tool="db_schema")
-        args = await db.db_args(ctx, database, {"table": table})
+        args = await db.db_args(ctx, dom, database, {"table": table})
         return await runner.submit(ctx, dom, "db_schema", args, write=False, tool="db_schema")
 
     @mcp.tool(
@@ -190,7 +218,7 @@ def register_db_tools(mcp: MCPServer, db: DbRunner) -> None:
     )
     async def db_query(domain: str, database: str, sql: str) -> dict[str, Any]:
         ctx, dom = await db.prepare(domain, scope="db:read", tool="db_query")
-        args = await db.db_args(ctx, database, {"sql": sql})
+        args = await db.db_args(ctx, dom, database, {"sql": sql})
         return await runner.submit(ctx, dom, "db_query", args, write=False, tool="db_query")
 
     @mcp.tool(
@@ -204,7 +232,7 @@ def register_db_tools(mcp: MCPServer, db: DbRunner) -> None:
     )
     async def db_execute(domain: str, database: str, sql: str, confirm: bool = False) -> dict[str, Any]:
         ctx, dom = await db.prepare(domain, scope="db:write", tool="db_execute")
-        args = await db.db_args(ctx, database, {"sql": sql, "confirm": confirm})
+        args = await db.db_args(ctx, dom, database, {"sql": sql, "confirm": confirm})
         return await runner.submit(ctx, dom, "db_execute", args, write=confirm, tool="db_execute", audit_fields={"database": database, "confirm": confirm})
 
     @mcp.tool(
@@ -222,7 +250,7 @@ def register_db_tools(mcp: MCPServer, db: DbRunner) -> None:
         dom = await runner.domain(ctx, domain, need_scope="db:write", tool="db_apply_schema")
         if "db:admin" not in dom.scopes and await db.service_row(ctx.login, database) is None:
             raise ToolError("Schemaänderungen an dieser Datenbank brauchen das Recht db:admin (nur vom Dienst angelegte Datenbanken gehen ohne).")
-        args = await db.db_args(ctx, database, {"sql": sql, "confirm": confirm})
+        args = await db.db_args(ctx, dom, database, {"sql": sql, "confirm": confirm})
         return await runner.submit(ctx, dom, "db_apply_schema", args, write=confirm, tool="db_apply_schema", audit_fields={"database": database, "confirm": confirm})
 
     @mcp.tool(
@@ -236,7 +264,7 @@ def register_db_tools(mcp: MCPServer, db: DbRunner) -> None:
     async def db_restore(domain: str, database: str, dump_id: str | None = None, confirm: bool = False) -> dict[str, Any]:
         ctx, dom = await db.prepare(domain, scope="db:write", tool="db_restore")
         extra = {"dump_id": dump_id, "confirm": confirm, "allow_full": "db:admin" in dom.scopes}
-        args = await db.db_args(ctx, database, extra)
+        args = await db.db_args(ctx, dom, database, extra)
         return await runner.submit(ctx, dom, "db_restore", args, write=bool(dump_id and confirm), tool="db_restore", audit_fields={"database": database, "dump_id": dump_id})
 
     @mcp.tool(
@@ -338,7 +366,7 @@ def register_db_tools(mcp: MCPServer, db: DbRunner) -> None:
         if not confirm:
             return {"database": database, "webspace": dom.info.webspace, "preview": True, "will_dump": True}
         auth = await db.customer_auth(ctx)
-        dump = await runner.submit(ctx, dom, "db_dump", await db.db_args(ctx, database, {"reason": "db_drop"}), write=True, tool="db_drop", audit_fields={"database": database})
+        dump = await runner.submit(ctx, dom, "db_dump", await db.db_args(ctx, dom, database, {"reason": "db_drop"}), write=True, tool="db_drop", audit_fields={"database": database})
         if "job_id" in dump:
             raise ToolError("Die Sicherung läuft noch; bitte db_drop danach erneut aufrufen.")
         runner.audit.write("db_drop", login=ctx.login, domain=dom.info.name, database=database, dump_id=dump.get("dump_id"), client=ctx.client_id)

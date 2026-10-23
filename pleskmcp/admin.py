@@ -63,6 +63,10 @@ class AdminPages:
             return False
         return hmac.compare_digest(presented.encode("utf-8"), expected.encode("utf-8"))
 
+    def authorized(self, request: Request) -> bool:
+        """True when the request carries the configured ADMIN_API_TOKEN (never when none is configured)."""
+        return self._authorized(request)
+
     @staticmethod
     def _challenge(status: int = 401) -> Response:
         return JSONResponse(

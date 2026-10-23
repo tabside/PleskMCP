@@ -3,13 +3,16 @@
 A job that fails must never surface as a bare "job failed [internal]" when the
 cause is a configuration problem (unusable key, wrong host key, missing sudoers
 rule, outdated helper) or a transport problem; and an unexpected exception in
-the worker must at least name its type so the operator finds it in the log.
+the worker must at least carry the job id so the operator finds it in the log
+(type and message are not shown to the client).
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+
+import httpx
 import os
 from pathlib import Path
 
@@ -146,7 +149,8 @@ def test_explain_error_messages():
     assert "sudoers" in explain({"code": "sudo_refused"})
     assert "install.sh" in explain({"code": "helper_crash"})
     assert "nicht erreichbar" in explain({"code": "ssh_unreachable"})
-    assert explain({"code": "internal", "message": "job failed", "details": {"error": "KeyImportError"}}) == "Interner Fehler im Dateidienst (KeyImportError). Der Hoster muss das beheben; der Fehler steht im Worker-Log. [internal]"
+    assert explain({"code": "internal", "message": "job failed", "details": {"job_id": "j1"}}) == "Interner Fehler im Dateidienst (Auftrag j1). Der Hoster muss das beheben; der Fehler steht im Worker-Log. [internal]"
+    assert explain({"code": "internal", "message": "job failed", "details": {"error": "KeyImportError"}}) == "Interner Fehler im Dateidienst. Der Hoster muss das beheben; der Fehler steht im Worker-Log. [internal]"
     assert "Zeitlimit" in explain({"code": "helper_timeout", "message": ""})
     assert explain({"code": "not_found", "message": "no such file"}) == "no such file [not_found]"
 
@@ -159,11 +163,11 @@ async def test_worker_failures_reach_the_client(env: Env, flow: OAuthFlow):
     text = tool_text(result)
     assert result["isError"] and "[ssh_config]" in text and "SSH-Schlüssel" in text
     assert "PLESK_SSH_KEY_PATH" not in text and "KeyImportError" not in text  # operator detail stays in the log
-    # the unexpected: a bug or an unmapped exception names its type, nothing else
+    # the unexpected: a bug or an unmapped exception gives the client the job id only, type and message stay in the log
     env.pool.fail_with = RuntimeError("secret path /var/www/vhosts/other/x")
     result = await call_tool(env.client, access, "storage_status", {"domain": "example.com"})
     text = tool_text(result)
-    assert result["isError"] and "[internal]" in text and "(RuntimeError)" in text and "/var/www" not in text
+    assert result["isError"] and "[internal]" in text and "(Auftrag " in text and "RuntimeError" not in text and "/var/www" not in text
     # job_status shows the same message for a job fetched later
     env.pool.fail_with = RemoteError("sudo refused", "sudo_refused")
     env.services.runner._settings = env.settings.__class__(**{**env.settings.__dict__, "tool_sync_wait": 0})
@@ -196,3 +200,14 @@ async def test_readyz_reports_preflight(env: Env):
     r = await env.client.get("/plesk/readyz")
     checks = r.json()["checks"]
     assert checks["ssh_preflight"] == "failed" and any("ssh_config" in m for m in checks["ssh_preflight_errors"])
+    # the error texts are operator detail: from a non-local address they need ADMIN_API_TOKEN, otherwise the field is left out
+    token = "admin-test-token-with-enough-length"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=env.app, client=("203.0.113.9", 4711)), base_url="https://mcp.example.com", headers={"host": "mcp.example.com"}) as remote:
+        r = await remote.get("/plesk/readyz")
+        checks = r.json()["checks"]
+        assert r.status_code == 200 and checks["ssh_preflight"] == "failed" and "ssh_preflight_errors" not in checks
+        assert "ssh_preflight_errors" not in (await remote.get("/plesk/readyz", headers={"authorization": f"Bearer {token}"})).json()["checks"]  # no token configured
+        object.__setattr__(env.settings, "admin_api_token", token)  # Settings is frozen
+        assert "ssh_preflight_errors" not in (await remote.get("/plesk/readyz", headers={"authorization": "Bearer wrong"})).json()["checks"]
+        checks = (await remote.get("/plesk/readyz", headers={"authorization": f"Bearer {token}"})).json()["checks"]
+        assert any("ssh_config" in m for m in checks["ssh_preflight_errors"])

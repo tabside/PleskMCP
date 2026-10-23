@@ -277,6 +277,23 @@ class Settings:
             "max_databases_created": self.max_databases_created,
         }
 
+    def startup_warnings(self) -> list[str]:
+        """Configuration that works but weakens the isolation; logged once by every process at start."""
+        warnings: list[str] = []
+        if "*" in self.profiles:
+            profile = self.profiles["*"]
+            scopes = ", ".join(getattr(profile, "scopes", ()) or ())
+            warnings.append(
+                f"ACCESS_PROFILES contains the wildcard profile \"*\": every subscription of a logged-in customer gets access "
+                f"({scopes or 'no scopes'}), whatever plan it has. Remove it unless that is intended."
+            )
+        if self.account_check_mode == "login_only":
+            warnings.append(
+                "ACCOUNT_CHECK_MODE=login_only: accounts and subscriptions are not re-checked after login; a customer suspended "
+                "or deleted in Plesk keeps file access until the tokens expire. Use customer_key or admin_key where possible."
+            )
+        return warnings
+
     @staticmethod
     def load(*, require_runtime: bool = True) -> "Settings":
         missing: list[str] = []

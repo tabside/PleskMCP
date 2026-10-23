@@ -109,6 +109,8 @@ def build_core(
     plesk_transport: Any | None = None,
 ) -> tuple[Store, Redis, AuditLog, PleskClient, AccountService, JobQueue, RedisLimiter]:
     """Shared objects of api, worker and scheduler."""
+    for warning in settings.startup_warnings():
+        logger.warning("%s", warning)
     if settings.audit_log_file:
         os.makedirs(os.path.dirname(settings.audit_log_file) or ".", exist_ok=True)
     store = store or Store(make_engine(settings.database_url))
@@ -197,6 +199,15 @@ async def readiness(services: Services) -> tuple[bool, dict[str, Any]]:
         checks["ssh_preflight_errors"] = sorted(set(failed))
     ok = bool(checks.get("database")) and bool(checks.get("redis"))
     return ok, checks
+
+
+LOCAL_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def operator_request(request: Request, admin: AdminPages) -> bool:
+    """Request from the operator: from localhost (the Docker host / a shell in the container) or with a valid ADMIN_API_TOKEN."""
+    host = request.client.host if request.client else None
+    return host in LOCAL_HOSTS or admin.authorized(request)
 
 
 async def metrics_text(services: Services) -> str:
@@ -324,6 +335,9 @@ def build_app(services: Services) -> Starlette:
     @mcp.custom_route("/readyz", methods=["GET"])
     async def readyz(request: Request) -> Response:
         ok, checks = await readiness(services)
+        if not operator_request(request, admin):
+            # operational detail (SSH setup error messages) only for the operator: localhost or ADMIN_API_TOKEN
+            checks.pop("ssh_preflight_errors", None)
         return JSONResponse({"status": "ok" if ok else "degraded", "checks": checks}, status_code=200 if ok else 503)
 
     if settings.metrics_enabled:

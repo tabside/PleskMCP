@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from cryptography.fernet import Fernet
 
 from pleskmcp.config import ConfigError, Settings
 
@@ -49,3 +50,33 @@ def test_base_path_derived(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("PUBLIC_BASE_URL", "http://mcp.example.com/plesk")
     with pytest.raises(ConfigError, match="https"):
         Settings.load()
+
+
+def test_startup_warnings_for_wildcard_profile_and_login_only(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path):
+    import json
+    import logging
+
+    for key, value in REQUIRED.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.setenv("DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(tmp_path / "audit.log"))
+    monkeypatch.setenv("DATA_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    monkeypatch.setenv("ACCESS_PROFILES", json.dumps({"AI Hosting": {"scopes": ["files:read"]}}))
+    assert Settings.load().startup_warnings() == []
+
+    monkeypatch.setenv("ACCESS_PROFILES", json.dumps({"*": {"scopes": ["files:read", "db:read"]}}))
+    monkeypatch.setenv("ACCOUNT_CHECK_MODE", "login_only")
+    settings = Settings.load()
+    warnings = settings.startup_warnings()
+    assert len(warnings) == 2
+    assert 'wildcard profile "*"' in warnings[0] and "files:read, db:read" in warnings[0]
+    assert "login_only" in warnings[1]
+
+    # build_core logs them, so api, worker and scheduler all show them at start
+    from pleskmcp.server import build_core
+
+    settings = settings.__class__(**{**settings.__dict__, "plesk_verify_ssl": False})  # no CA bundle needed in the test
+    with caplog.at_level(logging.WARNING, logger="pleskmcp.server"):
+        build_core(settings)
+    assert sum('wildcard profile "*"' in r.getMessage() for r in caplog.records) == 1
+    assert sum("login_only" in r.getMessage() for r in caplog.records) == 1

@@ -415,7 +415,7 @@ class Worker:
             logger.exception("job %s (%s/%s) crashed: %s", job_id, login, op, exc)
             try:
                 await self._queue.finish(
-                    job_id, login, status="failed", result=None, error={"code": "internal", "message": "job failed", "details": {"error": exc.__class__.__name__}}
+                    job_id, login, status="failed", result=None, error={"code": "internal", "message": "job failed", "details": {"job_id": job_id}}
                 )
                 await self._queue.record_metric(op, False, time.time() - started)
             except Exception:  # noqa: BLE001

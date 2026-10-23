@@ -15,6 +15,10 @@ profile; with several matches, every value takes the most generous one.
                       "max_databases_created": 3}
     }
 
+A profile keyed "*" is the fallback for every subscription whose plan and
+add-ons match nothing else, i.e. it opens every subscription of a logged-in
+customer whatever plan it has; Settings.startup_warnings() flags it.
+
 Scopes: files:read, files:write, dns:read, dns:write, db:read (db_list,
 db_schema, db_query), db:write (db_execute, db_restore of table dumps),
 db:admin (db_apply_schema, db_create, db_drop, full-dump restores),
