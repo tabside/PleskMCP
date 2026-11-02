@@ -40,6 +40,13 @@ def test_sql_validators():
         "INSERT INTO users VALUES (1)",
         "SELECT /*! DELETE */ 1 FROM users",
         "SELECT 1 UNION SELECT 1; CREATE TABLE x (a int)",
+        "SELECT 1 \\! id",
+        "SELECT 1 \\! id > /tmp/x",
+        "SELECT 1 \\. /tmp/x.sql",
+        "SELECT 1 \\T /tmp/out",
+        "SELECT 1 \\r other_db",
+        "SELECT 1 FROM users WHERE id = 1 \\G",
+        "SHOW TABLES \\! sh -c id",
     ]
     for sql in bad:
         with pytest.raises(module.HelperError):
@@ -47,6 +54,13 @@ def test_sql_validators():
     assert module.validate_write_sql("UPDATE users SET email='x' WHERE id=1")[1] == ["users"]
     assert module.validate_write_sql("DELETE FROM `posts` WHERE id=2")[1] == ["posts"]
     assert module.validate_write_sql("INSERT INTO posts (id, title) VALUES (3, 'x')")[1] == ["posts"]
+    for sql in ["UPDATE users SET a=1 WHERE id=1 \\! id", "INSERT INTO posts (id) VALUES (1) \\. /tmp/x"]:
+        with pytest.raises(module.HelperError):
+            module.validate_write_sql(sql)
+    with pytest.raises(module.HelperError):
+        module.validate_ddl_sql("CREATE TABLE notes (id INT) \\! id")
+    # a backslash inside a string literal stays allowed
+    module.validate_read_sql("SELECT 'a\\\\b', 'it\\'s' AS x")
     for sql in ["DROP TABLE users", "UPDATE users SET a=1; DROP TABLE users", "GRANT ALL ON *.* TO x", "CREATE TABLE t (a int)", "REPLACE INTO users VALUES (1)", "TRUNCATE users", "SELECT 1", "UPDATE users SET a=(SELECT 1 INTO OUTFILE '/x')"]:
         with pytest.raises(module.HelperError):
             module.validate_write_sql(sql)

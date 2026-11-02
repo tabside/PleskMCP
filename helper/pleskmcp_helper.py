@@ -1498,7 +1498,8 @@ class MysqlSession(object):
         _unlink_quiet(self.defaults)
 
     def run(self, sql, time_limit, max_lines=None, database=None):
-        cmd = [self.mysql, "--defaults-extra-file=" + self.defaults, "--batch", "--raw", "--default-character-set=utf8mb4", "--connect-timeout=5"]
+        # --binary-mode: the client ignores its own backslash commands (\! shell, \. source, \T tee, ...)
+        cmd = [self.mysql, "--defaults-extra-file=" + self.defaults, "--binary-mode", "--batch", "--raw", "--default-character-set=utf8mb4", "--connect-timeout=5"]
         if database is not False:
             cmd.append(database or self.database)
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -1545,7 +1546,7 @@ class MysqlSession(object):
         os.chmod(target_gz, 0o600)
 
     def restore(self, source_gz, time_limit):
-        cmd = [self.mysql, "--defaults-extra-file=" + self.defaults, "--default-character-set=utf8mb4", self.database]
+        cmd = [self.mysql, "--defaults-extra-file=" + self.defaults, "--binary-mode", "--default-character-set=utf8mb4", self.database]
         with gzip.open(source_gz, "rb") as src:
             proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             try:
@@ -1605,6 +1606,10 @@ def _strip_sql(sql):
                 out.append(" '' ")
             i += 1
             continue
+        if ch == "\\":
+            # the mysql client runs backslash commands (\! shell, \. source, \T tee, ...) outside of string
+            # literals, even in batch mode: never let one through (the client also runs with --binary-mode)
+            raise HelperError("bad_request", "backslash outside of string literals is not allowed")
         if sql.startswith("--", i) or ch == "#":
             while i < n and sql[i] != "\n":
                 i += 1
