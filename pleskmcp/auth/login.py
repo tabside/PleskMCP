@@ -12,6 +12,7 @@ from __future__ import annotations
 import html
 import logging
 import secrets
+from urllib.parse import urlsplit
 from typing import Any
 
 from starlette.requests import Request
@@ -95,6 +96,8 @@ _PAGE = """<!doctype html>
 <div class="card">
   <h1>{service}</h1>
   <p><span class="client">{client_name}</span> möchte sich mit deinem Hosting verbinden.</p>
+  <p class="muted">Nach der Anmeldung geht es weiter zu <strong>{redirect_host}</strong>.</p>
+  {redirect_warning}
   <p class="muted">Die Verbindung erhält folgende Rechte (gelten nur für Abos mit gebuchtem KI-Zugang):</p>
   <ul>{scope_items}</ul>
   {error_block}
@@ -132,6 +135,36 @@ def client_ip(request: Request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+# Hosts of well-known MCP clients. Any other redirect target gets a visible warning on the login page:
+# anyone can register an OAuth client with any name (dynamic client registration), so the name alone
+# ("Claude") proves nothing - the host the code is sent to does.
+KNOWN_REDIRECT_HOSTS = ("claude.ai", "claude.com", "chatgpt.com", "chat.openai.com", "localhost", "127.0.0.1")
+
+
+def redirect_host(uri: str) -> str:
+    try:
+        return (urlsplit(uri).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
+def known_redirect(uri: str) -> bool:
+    host = redirect_host(uri)
+    return any(host == h or host.endswith("." + h) for h in KNOWN_REDIRECT_HOSTS)
+
+
+def redirect_warning(uri: str, client_name: str) -> str:
+    if known_redirect(uri):
+        return ""
+    host = html.escape(redirect_host(uri) or "unbekannt")
+    return (
+        '<div class="error">Achtung: Diese Anwendung ist nicht als bekannter KI-Dienst hinterlegt. Die Anmeldung '
+        f"wird an <strong>{host}</strong> weitergegeben. Nur fortfahren, wenn du diese Verbindung gerade selbst "
+        f"gestartet hast und <strong>{host}</strong> kennst - der angezeigte Name «{html.escape(client_name)}» "
+        "kann frei gewählt sein.</div>"
+    )
+
+
 class LoginPages:
     def __init__(
         self,
@@ -161,6 +194,7 @@ class LoginPages:
         error: str | None = None,
         login_value: str = "",
         revoke_others: bool = True,
+        redirect_uri: str = "",
     ) -> str:
         items = "".join(f"<li>{html.escape(SCOPE_TEXT.get(s, s))}</li>" for s in scopes) or "<li>Keine</li>"
         error_block = f'<div class="error">{html.escape(error)}</div>' if error else ""
@@ -175,6 +209,8 @@ class LoginPages:
             csrf=html.escape(csrf),
             login_value=html.escape(login_value),
             revoke_checked="checked" if revoke_others else "",
+            redirect_host=html.escape(redirect_host(redirect_uri) or "unbekannt"),
+            redirect_warning=redirect_warning(redirect_uri, client_name),
             account_url=html.escape(f"{self._settings.public_base_url}/account"),
         )
 
@@ -201,6 +237,7 @@ class LoginPages:
             client_name=await self._client_name(client_id),
             scopes=params["scopes"],
             csrf=csrf,
+            redirect_uri=str(params.get("redirect_uri") or ""),
         )
         response = HTMLResponse(page, headers={"Cache-Control": "no-store", "Referrer-Policy": "no-referrer"})
         response.set_cookie(
@@ -248,6 +285,7 @@ class LoginPages:
                 error=message,
                 login_value=login,
                 revoke_others=revoke_others,
+                redirect_uri=str(params.get("redirect_uri") or ""),
             )
             return HTMLResponse(page, status_code=status, headers={"Cache-Control": "no-store"})
 

@@ -101,6 +101,13 @@ class Services:
         await self.store.close()
 
 
+def _no_frame(response: Response) -> Response:
+    """Pages with credentials or customer data must not be shown inside a frame of another site (clickjacking)."""
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Content-Security-Policy", "frame-ancestors 'none'")
+    return response
+
+
 def build_core(
     settings: Settings,
     *,
@@ -253,31 +260,31 @@ def build_app(services: Services) -> Starlette:
 
     @mcp.custom_route("/login", methods=["GET"])
     async def login_get(request: Request) -> Response:
-        return await login.get(request)
+        return _no_frame(await login.get(request))
 
     @mcp.custom_route("/login", methods=["POST"])
     async def login_post(request: Request) -> Response:
-        return await login.post(request)
+        return _no_frame(await login.post(request))
 
     @mcp.custom_route("/account", methods=["GET"])
     async def account_get(request: Request) -> Response:
-        return await account.get(request)
+        return _no_frame(await account.get(request))
 
     @mcp.custom_route("/account/login", methods=["POST"])
     async def account_login(request: Request) -> Response:
-        return await account.post_login(request)
+        return _no_frame(await account.post_login(request))
 
     @mcp.custom_route("/account/logout", methods=["POST"])
     async def account_logout(request: Request) -> Response:
-        return await account.post_logout(request)
+        return _no_frame(await account.post_logout(request))
 
     @mcp.custom_route("/account/disconnect", methods=["POST"])
     async def account_disconnect(request: Request) -> Response:
-        return await account.post_disconnect(request)
+        return _no_frame(await account.post_disconnect(request))
 
     @mcp.custom_route("/account/db", methods=["POST"])
     async def account_db(request: Request) -> Response:
-        return await account.post_db(request)
+        return _no_frame(await account.post_db(request))
 
     if services.signup is not None:
         signup = SignupPages(settings, services.signup, services.limiter, services.redis)
@@ -316,11 +323,11 @@ def build_app(services: Services) -> Starlette:
 
         @mcp.custom_route("/signup/admin", methods=["GET"])
         async def signup_admin(request: Request) -> Response:
-            return await signup.admin(request)
+            return _no_frame(await signup.admin(request))
 
         @mcp.custom_route("/signup/admin/action", methods=["POST"])
         async def signup_admin_action(request: Request) -> Response:
-            return await signup.admin_action(request)
+            return _no_frame(await signup.admin_action(request))
 
     admin = AdminPages(settings, services.store, services.runner.usage, services.limiter, services.audit)
 

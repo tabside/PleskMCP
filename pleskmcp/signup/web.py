@@ -39,6 +39,8 @@ from .store import ACTIVE, AWAITING_CONFIRMATION, AWAITING_PAYMENT, NEEDS_ATTENT
 
 logger = logging.getLogger(__name__)
 
+ADMIN_PASSWORD_MIN_LENGTH = 24  # shorter SIGNUP_ADMIN_PASSWORD: /signup/admin stays disabled
+
 STATUS_LABELS = {
     AWAITING_CONFIRMATION: "wartet auf E-Mail-Bestätigung",
     AWAITING_PAYMENT: "wartet auf Zahlung",
@@ -107,9 +109,12 @@ class SignupPages:
     def __init__(self, settings: Settings, service: SignupService, limiter: RedisLimiter, redis: Redis):
         self._settings = settings
         self.service = service
-        self.cfg = service.cfg
         self._limiter = limiter
         self._redis = redis
+
+    @property
+    def cfg(self):
+        return self.service.cfg
 
     @property
     def base(self) -> str:
@@ -335,8 +340,29 @@ class SignupPages:
         return RedirectResponse(url, status_code=303, headers={"Cache-Control": "no-store"})
 
     # ------------------------------------------------------------------- admin
+    def _admin_enabled(self) -> bool:
+        # the page shows customer data and can delete subscriptions: a short password disables it
+        return bool(self.cfg.admin_user) and len(self.cfg.admin_password or "") >= ADMIN_PASSWORD_MIN_LENGTH
+
+    async def _admin_gate(self, request: Request) -> Response | None:
+        """None when the request may continue; otherwise the response to send. Failed attempts (a wrong
+        Authorization header, not the browser's first request without one) count per IP, after
+        ADMIN_FAIL_LIMIT failures within ADMIN_FAIL_WINDOW nothing is checked any more."""
+        if not self._admin_enabled():
+            return simple_page("Nicht verfügbar", "Die Verwaltung ist nicht eingerichtet.", status=404)
+        ip = client_ip(request)
+        retry_after = await self._limiter.admin_retry_after(ip)
+        if retry_after is not None:
+            return PlainTextResponse("Zu viele Fehlversuche", status_code=429, headers={"Retry-After": str(retry_after), "Cache-Control": "no-store"})
+        if self._admin_ok(request):
+            return None
+        if request.headers.get("authorization"):
+            await self._limiter.record_admin_failure(ip)
+            logger.warning("signup admin: failed authentication from %s", ip)
+        return self._admin_challenge()
+
     def _admin_ok(self, request: Request) -> bool:
-        if not self.cfg.admin_user or not self.cfg.admin_password:
+        if not self._admin_enabled():
             return False
         header = request.headers.get("authorization", "")
         if not header.lower().startswith("basic "):
@@ -356,8 +382,8 @@ class SignupPages:
         return token
 
     async def admin(self, request: Request, notice: str | None = None) -> Response:
-        if not self._admin_ok(request):
-            return self._admin_challenge()
+        if (blocked := await self._admin_gate(request)) is not None:
+            return blocked
         ip = client_ip(request)
         if await self._limited(f"admin:{ip}", 120, 60):
             return simple_page("Zu viele Anfragen", "Bitte kurz warten.", status=429)
@@ -406,8 +432,8 @@ class SignupPages:
         return HTMLResponse(page, headers={"Cache-Control": "no-store"})
 
     async def admin_action(self, request: Request) -> Response:
-        if not self._admin_ok(request):
-            return self._admin_challenge()
+        if (blocked := await self._admin_gate(request)) is not None:
+            return blocked
         form = await request.form()
         csrf = str(form.get("csrf") or "")
         if not csrf or not await self._redis.delete(f"signup:admincsrf:{csrf}"):

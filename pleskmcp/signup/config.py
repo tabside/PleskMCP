@@ -7,10 +7,14 @@ required and the api refuses to start when one is missing.
 
 from __future__ import annotations
 
+import logging
+
 import hashlib
 from dataclasses import dataclass, field
 
 from ..config import ConfigError, _env, _env_bool, _env_float, _env_int, _env_list
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_PRICE_LIST = "pleskmcp/signup/data/domains.json"  # relative to the package root; see pricelist.py
 
@@ -140,6 +144,8 @@ def load_signup_settings(*, public_base_url: str, plesk_url: str, data_encryptio
     admin_password = _env("SIGNUP_ADMIN_PASSWORD")
     if bool(admin_user) != bool(admin_password):
         missing.append("SIGNUP_ADMIN_USER and SIGNUP_ADMIN_PASSWORD (both or none)")
+    if admin_password and len(admin_password) < 24:
+        logger.warning("SIGNUP_ADMIN_PASSWORD is shorter than 24 characters: /signup/admin stays disabled until it is changed")
 
     settings = SignupSettings(
         enabled=True,

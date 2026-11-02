@@ -253,7 +253,7 @@ SIGNUP_ENV = {
     "SIGNUP_RATE_LIMIT_IP": "20",
     "SIGNUP_RATE_LIMIT_EMAIL": "4",
     "SIGNUP_ADMIN_USER": "admin",
-    "SIGNUP_ADMIN_PASSWORD": "adminpw",
+    "SIGNUP_ADMIN_PASSWORD": "admin-test-password-0123456789",
     "REBILL_API_URL": "https://rebill.example.com/api/v1",
     "REBILL_API_TOKEN": "rbl_test",
     "BEXIO_API_TOKEN": "bexio_test",
@@ -560,7 +560,7 @@ async def test_activation_retries_and_needs_attention(senv: SignupEnv):
     senv.netim.fail_register = False
     page = await senv.client.get("/plesk/signup/admin")
     assert page.status_code == 401
-    auth = {"authorization": "Basic " + __import__("base64").b64encode(b"admin:adminpw").decode()}
+    auth = {"authorization": "Basic " + __import__("base64").b64encode(b"admin:admin-test-password-0123456789").decode()}
     page = await senv.client.get("/plesk/signup/admin", headers=auth)
     assert page.status_code == 200 and "abgelehnt.ch" in page.text and "manuelle Prüfung" in page.text
     csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
@@ -653,7 +653,7 @@ async def test_cancellation_and_deletion(senv: SignupEnv):
     o = await status_of(senv, o.id)
     assert o.status == "pending_deletion" and o.plesk_login in senv.plesk.users and any("Admin-Übersicht" in n for _, n in senv.zammad.notes)
     # admin confirms -> Plesk subscription and customer gone, status deleted, note
-    auth = {"authorization": "Basic " + __import__("base64").b64encode(b"admin:adminpw").decode()}
+    auth = {"authorization": "Basic " + __import__("base64").b64encode(b"admin:admin-test-password-0123456789").decode()}
     page = await senv.client.get("/plesk/signup/admin", headers=auth)
     csrf = re.search(r'name="csrf" value="([^"]+)"', page.text).group(1)
     r = await senv.client.post("/plesk/signup/admin/action", data={"csrf": csrf, "order_id": o.id, "action": "confirm_delete"}, headers=auth)
@@ -787,3 +787,35 @@ async def test_unconfirmed_orders_expire_without_billing(senv: SignupEnv):
     senv.mailer.fail = True
     r = await order(senv, confirm=False, email="c@example.com", domain="mailfehler.ch")
     assert r.status_code == 503 and r.json()["error"] == "mail_failed"
+
+
+async def test_signup_admin_locks_out_after_failed_logins(senv: SignupEnv):
+    """Wrong passwords count per IP (the browser's first request without credentials does not); after the
+    limit nothing is checked any more, not even the right password. The page must not be framed."""
+    import base64
+
+    from pleskmcp.auth.ratelimit import ADMIN_FAIL_LIMIT
+
+    good = {"authorization": "Basic " + base64.b64encode(b"admin:admin-test-password-0123456789").decode()}
+    bad = {"authorization": "Basic " + base64.b64encode(b"admin:falsch").decode()}
+    for _ in range(3):
+        assert (await senv.client.get("/plesk/signup/admin")).status_code == 401
+    page = await senv.client.get("/plesk/signup/admin", headers=good)
+    assert page.status_code == 200
+    assert page.headers["x-frame-options"] == "DENY" and "frame-ancestors 'none'" in page.headers["content-security-policy"]
+    for _ in range(ADMIN_FAIL_LIMIT):
+        assert (await senv.client.get("/plesk/signup/admin", headers=bad)).status_code == 401
+    locked = await senv.client.get("/plesk/signup/admin", headers=good)
+    assert locked.status_code == 429 and int(locked.headers["retry-after"]) > 0
+    r = await senv.client.post("/plesk/signup/admin/action", data={"csrf": "x", "order_id": "1", "action": "retry"}, headers=good)
+    assert r.status_code == 429
+
+
+async def test_signup_admin_disabled_with_short_password(senv: SignupEnv, monkeypatch: pytest.MonkeyPatch):
+    import base64
+    import dataclasses
+
+    monkeypatch.setattr(senv.service, "cfg", dataclasses.replace(senv.service.cfg, admin_password="kurz"))
+    auth = {"authorization": "Basic " + base64.b64encode(b"admin:kurz").decode()}
+    r = await senv.client.get("/plesk/signup/admin", headers=auth)
+    assert r.status_code == 404
